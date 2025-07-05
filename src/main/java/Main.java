@@ -6,7 +6,7 @@ public class Main {
         try (EventLoop eventLoop = new EventLoop(6379)) {
             eventLoop.start();
         } catch (Exception e) {
-            LoggingService.logError("IOException in setup: " + e.getMessage(), e);
+            LoggingService.logError("Error: " + e.getMessage(), e);
         }
     }
 }

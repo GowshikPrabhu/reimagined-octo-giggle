@@ -11,19 +11,22 @@ public class RESPEncoder {
     }
 
     public static String encodeBulkString(String s) {
-        return s == null ? "$-1\r\n" : "$" + s.length() + "\r\n" + s + "\r\n";
+        if (s == null) {
+            return "$-1\r\n";
+        }
+        return "$" + s.length() + "\r\n" + s + "\r\n";
     }
 
-    public static String encodeStringArray(List<String> commands) {
+    public static String encodeStringArray(List<String> strings) {
         StringBuilder sb = new StringBuilder();
-        sb.append("*").append(commands.size()).append("\r\n");
-        for (String command : commands) {
-            sb.append(encodeBulkString(command));
+        sb.append("*").append(strings.size()).append("\r\n");
+        for (String str : strings) {
+            sb.append(encodeBulkString(str));
         }
         return sb.toString();
     }
 
-    public static String encodeError(String s) {
-        return "-" + s + "\r\n";
+    public static String encodeError(String message) {
+        return "-" + message + "\r\n";
     }
 }

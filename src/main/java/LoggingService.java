@@ -1,3 +1,5 @@
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.logging.*;
 
 public class LoggingService {
@@ -9,7 +11,18 @@ public class LoggingService {
         handler.setFormatter(new Formatter() {
             @Override
             public String format(LogRecord record) {
-                return String.format("%s: %s%n", record.getLevel().getName(), record.getMessage());
+                StringBuilder sb = new StringBuilder();
+                sb.append(String.format("%s: %s%n", record.getLevel().getName(), record.getMessage()));
+
+                if (record.getThrown() != null) {
+                    StringWriter sw = new StringWriter();
+                    PrintWriter pw = new PrintWriter(sw);
+                    record.getThrown().printStackTrace(pw);
+                    sb.append(sw);
+                }
+
+                return sb.toString();
+
             }
         });
         handler.setLevel(Level.INFO);
