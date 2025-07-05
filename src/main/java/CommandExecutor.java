@@ -1,30 +1,26 @@
-import java.io.IOException;
-import java.io.OutputStream;
 import java.util.List;
 
 public class CommandExecutor {
 
-    public void executeCommand(String command, List<String> args, OutputStream outputStream) throws IOException {
+    public String executeCommand(String command, List<String> args) {
         if ("ping".equalsIgnoreCase(command)) {
-            writePong(outputStream);
+            return getPongResponse();
         } else if ("command".equalsIgnoreCase(command)) {
-            writeAvailableCommands(outputStream);
-        }else {
+            return getAvailableCommands();
+        } else {
             LoggingService.logError("Unknown command: " + command + " with args: " + args);
-            outputStream.write(("-ERR unknown command '" + command + "'\r\n").getBytes());
+            return "-ERR unknown command '" + command + "'\r\n";
         }
     }
 
-    private void writeAvailableCommands(OutputStream outputStream) throws IOException {
+    private String getAvailableCommands() {
         List<String> commands = List.of("ping", "command");
-        outputStream.write(RESPEncoder.encodeStringArray(commands).getBytes());
-        outputStream.flush();
-        LoggingService.logFine("Sent command list COMMAND.");
+        LoggingService.logFine("Sending command list COMMAND.");
+        return RESPEncoder.encodeStringArray(commands);
     }
 
-    private void writePong(OutputStream outputStream) throws IOException {
-        outputStream.write(RESPEncoder.encodeSimpleString("PONG").getBytes());
-        outputStream.flush();
+    private String getPongResponse() {
         LoggingService.logFine("Sent PONG for PING.");
+        return RESPEncoder.encodeSimpleString("PONG");
     }
 }

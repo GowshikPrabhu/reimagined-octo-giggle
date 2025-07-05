@@ -9,14 +9,10 @@ public class LoggingService {
         handler.setFormatter(new Formatter() {
             @Override
             public String format(LogRecord record) {
-                return String.format(
-                        "%17s | %s: %s%n",
-                        Thread.currentThread().getName(),
-                        record.getLevel().getName(),
-                        record.getMessage());
+                return String.format("%s: %s%n", record.getLevel().getName(), record.getMessage());
             }
         });
-        handler.setLevel(Level.FINE);
+        handler.setLevel(Level.INFO);
         logger.addHandler(handler);
         logger.setLevel(Level.ALL);
     }
