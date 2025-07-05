@@ -11,7 +11,7 @@ public class RESPEncoder {
     }
 
     public static String encodeBulkString(String s) {
-        return "$" + s.length() + "\r\n" + s + "\r\n";
+        return s == null ? "$-1\r\n" : "$" + s.length() + "\r\n" + s + "\r\n";
     }
 
     public static String encodeStringArray(List<String> commands) {

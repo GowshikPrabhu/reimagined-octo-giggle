@@ -9,11 +9,17 @@ import java.util.List;
 public class EventLoop implements AutoCloseable {
 
     private final Selector selector;
-    private final CommandParser commandParser = new CommandParser();
-    private final CommandExecutor commandExecutor = new CommandExecutor();
-    private final ByteBuffer readBuffer = ByteBuffer.allocate(1024);
+    private final Cache cache;
+    private final CommandParser commandParser;
+    private final CommandExecutor commandExecutor;
+    private final ByteBuffer readBuffer;
 
     public EventLoop(int port) throws IOException {
+        cache = new Cache();
+        commandParser = new CommandParser();
+        commandExecutor = new CommandExecutor(cache);
+        readBuffer = ByteBuffer.allocate(1024);
+
         selector = Selector.open();
         ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.bind(new InetSocketAddress(port));
