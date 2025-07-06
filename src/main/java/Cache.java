@@ -33,6 +33,13 @@ public class Cache {
         }
     }
 
+    public void putFromDB(String key, String value, long timeStampMillis) {
+        data.put(key, value);
+        if (timeStampMillis > 0) {
+            expirations.put(key, timeStampMillis);
+        }
+    }
+
     public Iterator<Map.Entry<String, Long>> expirableIterator() {
         return expirations.entrySet().iterator();
     }

@@ -74,16 +74,16 @@ public class RDBParser {
                 checkEOF(valueType, "Reading value type");
                 String key = readString(reader);
                 Object value = readValueByType(reader, valueType);
-                Cache.getInstance().put(key, value.toString(), expirySecs * 1000L);
-                LoggingService.logInfo("Setting expiry for key: " + key + " value: " + value + " expiry: " + expirySecs);
+                Cache.getInstance().putFromDB(key, value.toString(), expirySecs * 1000L);
+                LoggingService.logInfo("Setting expiry for key: " + key + " value: " + value + " expiry (S): " + expirySecs);
             } else if (opCode == OP_EXPIRETIMEMS) {
                 long expiryMillis = readLong(reader);
                 int valueType = reader.read();
                 checkEOF(valueType, "Reading value type");
                 String key = readString(reader);
                 Object value = readValueByType(reader, valueType);
-                Cache.getInstance().put(key, value.toString(), expiryMillis);
-                LoggingService.logInfo("Setting expiry for key: " + key + " value: " + value + " expiry: " + expiryMillis);
+                Cache.getInstance().putFromDB(key, value.toString(), expiryMillis);
+                LoggingService.logInfo("Setting expiry for key: " + key + " value: " + value + " expiry (MS): " + expiryMillis);
             } else if (opCode == OP_END) {
                 LoggingService.logInfo("End of file reached");
                 break;
@@ -92,7 +92,7 @@ public class RDBParser {
                 checkEOF(opCode, "Reading value type");
                 String key = readString(reader);
                 Object value = readValueByType(reader, opCode);
-                Cache.getInstance().put(key, value.toString(), 0);
+                Cache.getInstance().putFromDB(key, value.toString(), 0);
                 LoggingService.logInfo("Key: " + key + " value: " + value);
             }
         }
