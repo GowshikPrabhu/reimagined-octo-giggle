@@ -1,7 +1,5 @@
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.regex.Pattern;
 
 public class CommandExecutor {
 
@@ -21,6 +19,7 @@ public class CommandExecutor {
         commandHandlers.put("set", this::handleSetRequest);
         commandHandlers.put("get", this::handleGetRequest);
         commandHandlers.put("config", this::handleConfigRequest);
+        commandHandlers.put("keys", this::handleKeysRequest);
     }
 
     public String executeCommand(String command, List<String> args) {
@@ -36,7 +35,7 @@ public class CommandExecutor {
     }
 
     private String handleCommandsRequest(List<String> args) {
-        List<String> commands = List.of("command", "ping", "echo", "set", "get", "config");
+        List<String> commands = List.of("command", "ping", "echo", "set", "get", "config", "keys");
         LoggingService.logFine("Sending command list COMMAND.");
         return RESPEncoder.encodeStringArray(commands);
     }
@@ -120,5 +119,22 @@ public class CommandExecutor {
         } else {
             return RESPEncoder.encodeError("ERR unknown sub command '" + subCommand + "' for 'config' command");
         }
+    }
+
+    public String handleKeysRequest(List<String> args) {
+        if (args.isEmpty()) {
+            return RESPEncoder.encodeError("ERR wrong number of arguments for 'keys' command");
+        }
+        String arg = args.getFirst();
+        List<String> resultKeys;
+        if (arg.equalsIgnoreCase("*")) {
+            resultKeys = Arrays.asList(cache.keys());
+        } else {
+            String regexPattern = Globs.toRegexPattern(arg);
+            Pattern pattern = Pattern.compile(regexPattern);
+            resultKeys = Arrays.stream(cache.keys()).filter(key -> pattern.matcher(key).matches()).toList();
+        }
+        LoggingService.logFine("Sending keys list for prefix '" + arg + "': " + resultKeys);
+        return RESPEncoder.encodeStringArray(resultKeys);
     }
 }

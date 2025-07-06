@@ -1,6 +1,4 @@
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.*;
 
 public class Cache {
     private final Map<String, String> data = new HashMap<>();
@@ -38,5 +36,9 @@ public class Cache {
             return false;
         }
         return System.currentTimeMillis() >= expiration;
+    }
+
+    public String[] keys() {
+        return data.keySet().toArray(new String[0]);
     }
 }
