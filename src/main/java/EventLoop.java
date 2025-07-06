@@ -8,7 +8,6 @@ import java.util.*;
 public class EventLoop implements AutoCloseable {
 
     private final Selector selector;
-    private final Cache cache;
     private final CommandParser commandParser;
     private final CommandExecutor commandExecutor;
     private final Expiry expiry;
@@ -17,10 +16,9 @@ public class EventLoop implements AutoCloseable {
     private final Map<SocketChannel, Queue<ByteBuffer>> clientWriteBuffers = new HashMap<>();
 
     public EventLoop(int port) throws IOException {
-        cache = new Cache();
         commandParser = new CommandParser();
-        commandExecutor = new CommandExecutor(cache);
-        expiry = new Expiry(cache);
+        commandExecutor = new CommandExecutor();
+        expiry = new Expiry();
 
         selector = Selector.open();
         ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();

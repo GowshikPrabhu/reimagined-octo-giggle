@@ -2,12 +2,8 @@ import java.util.Iterator;
 import java.util.Map;
 
 public class Expiry {
-    private final Cache cache;
+    private final Cache cache = Cache.getInstance();
     private long lastScan = 0L;
-
-    public Expiry(Cache cache) {
-        this.cache = cache;
-    }
 
     public void scanAndExpire() {
         long now = System.currentTimeMillis();

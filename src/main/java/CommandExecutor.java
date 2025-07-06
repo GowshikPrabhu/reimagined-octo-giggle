@@ -10,8 +10,8 @@ public class CommandExecutor {
     private final Cache cache;
     private final Map<String, CommandHandler> commandHandlers = new HashMap<>();
 
-    public CommandExecutor(Cache cache) {
-        this.cache = cache;
+    public CommandExecutor() {
+        this.cache = Cache.getInstance();
 
         commandHandlers.put("command", this::handleCommandsRequest);
         commandHandlers.put("ping", this::handlePing);
@@ -36,8 +36,27 @@ public class CommandExecutor {
 
     private String handleCommandsRequest(List<String> args) {
         List<String> commands = List.of("command", "ping", "echo", "set", "get", "config", "keys");
-        LoggingService.logFine("Sending command list COMMAND.");
-        return RESPEncoder.encodeStringArray(commands);
+        if (args.isEmpty()) {
+            LoggingService.logFine("Sending command list COMMAND.");
+            return RESPEncoder.encodeStringArray(commands);
+        } else {
+            String arg = args.getFirst();
+            if (arg.equalsIgnoreCase("docs")) {
+                if (args.size() > 1) {
+                    return RESPEncoder.encodeError("ERR Unimplemented subcommand 'docs' for 'command' command");
+                }
+                Map<String, Map<String, String>> commandDocs = new HashMap<>();
+                for (String commandName : commands) {
+                    Map<String, String> commandDoc = new HashMap<>();
+                    commandDoc.put("summary", "Summary of " + commandName + " command");
+                    commandDocs.put(commandName, commandDoc);
+                }
+                LoggingService.logFine("Sending command list DOCUMENTATION.");
+                return RESPEncoder.encodeMap(commandDocs);
+
+            }
+            return RESPEncoder.encodeError("ERR unknown command '" + arg + "' for 'command' command");
+        }
     }
 
     private String handlePing(List<String> args) {
