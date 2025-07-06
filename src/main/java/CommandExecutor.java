@@ -1,3 +1,4 @@
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +20,7 @@ public class CommandExecutor {
         commandHandlers.put("echo", this::handleEchoRequest);
         commandHandlers.put("set", this::handleSetRequest);
         commandHandlers.put("get", this::handleGetRequest);
+        commandHandlers.put("config", this::handleConfigRequest);
     }
 
     public String executeCommand(String command, List<String> args) {
@@ -34,7 +36,7 @@ public class CommandExecutor {
     }
 
     private String handleCommandsRequest(List<String> args) {
-        List<String> commands = List.of("command", "ping", "echo", "set", "get");
+        List<String> commands = List.of("command", "ping", "echo", "set", "get", "config");
         LoggingService.logFine("Sending command list COMMAND.");
         return RESPEncoder.encodeStringArray(commands);
     }
@@ -95,5 +97,28 @@ public class CommandExecutor {
         String key = args.getFirst();
         String value = cache.get(key);
         return RESPEncoder.encodeBulkString(value);
+    }
+
+    public String handleConfigRequest(List<String> args) {
+        if (args.size() < 2) {
+            return RESPEncoder.encodeError("ERR wrong number of arguments for 'config' command");
+        }
+        String subCommand = args.getFirst().toLowerCase();
+        if (subCommand.equals("get")) {
+            String key = args.get(1);
+            String value = Configs.getConfiguration(key);
+            return value == null ? RESPEncoder.encodeStringArray(Collections.emptyList())
+                    : RESPEncoder.encodeStringArray(List.of(key, value));
+        } else if (subCommand.equals("set")) {
+            if (args.size() < 3) {
+                return RESPEncoder.encodeError("ERR wrong number of arguments for 'config set' command");
+            }
+            String key = args.get(1);
+            String value = args.get(2);
+            Configs.setConfiguration(key, value);
+            return RESPEncoder.encodeSimpleString("OK");
+        } else {
+            return RESPEncoder.encodeError("ERR unknown sub command '" + subCommand + "' for 'config' command");
+        }
     }
 }
