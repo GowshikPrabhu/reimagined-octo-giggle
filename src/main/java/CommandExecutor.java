@@ -21,6 +21,7 @@ public class CommandExecutor {
         commandHandlers.put("config", this::handleConfigRequest);
         commandHandlers.put("keys", this::handleKeysRequest);
         commandHandlers.put("info", this::handleInfoRequest);
+        commandHandlers.put("replconf", this::handleReplConfRequest);
     }
 
     public String executeCommand(String command, List<String> args) {
@@ -171,6 +172,30 @@ public class CommandExecutor {
             return RESPEncoder.encodeBulkString(sb.toString());
         } else {
             return RESPEncoder.encodeError("ERR unknown info subcommand '" + arg + "'");
+        }
+    }
+
+    public String handleReplConfRequest(List<String> args) {
+        if (args.isEmpty()) {
+            return RESPEncoder.encodeError("ERR empty replconf command unimplemented");
+        }
+        String arg = args.getFirst();
+        if (arg.equalsIgnoreCase("listening-port")) {
+            if (args.size() < 2) {
+                return RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf listening-port' command");
+            }
+            arg = args.get(1);
+            LoggingService.logInfo("Got REPLCONF with listening-port: " + arg);
+            return RESPEncoder.encodeSimpleString("OK");
+        } else if (arg.equalsIgnoreCase("capa")) {
+            if (args.size() < 2) {
+                return RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf capa' command");
+            }
+            arg = args.get(1);
+            LoggingService.logInfo("Got REPLCONF with capa: " + arg);
+            return RESPEncoder.encodeSimpleString("OK");
+        } else {
+            return RESPEncoder.encodeError("ERR unknown replconf subcommand '" + arg + "'");
         }
     }
 }

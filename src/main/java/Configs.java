@@ -6,6 +6,7 @@ public class Configs {
     public static final long SELECTOR_WAIT_INTERVAL_MS = 10;
     public static final int READ_BUFFER_SIZE = 8196;
     public static final int MAX_COMMANDS_PER_READ = 100;
+    public static final int HANDSHAKE_TIMEOUT_MS = 5000;
 
     private static final Map<String, String> config = new HashMap<>();
 

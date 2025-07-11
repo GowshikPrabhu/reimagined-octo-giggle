@@ -11,6 +11,7 @@ public class EventLoop implements AutoCloseable {
     private final CommandParser commandParser;
     private final CommandExecutor commandExecutor;
     private final Expiry expiry;
+    private final ReplicationHandler replicationHandler;
 
     private final Map<SocketChannel, ByteBuffer> clientReadBuffers = new HashMap<>();
     private final Map<SocketChannel, Queue<ByteBuffer>> clientWriteBuffers = new HashMap<>();
@@ -26,9 +27,13 @@ public class EventLoop implements AutoCloseable {
         serverSocketChannel.configureBlocking(false);
         LoggingService.logInfo("Server listening on port " + port);
         serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+
+        replicationHandler = new ReplicationHandler(port);
     }
 
     public void start() throws IOException {
+        replicationHandler.handle();
+
         LoggingService.logInfo("Starting event loop...");
 
         while (selector.isOpen()) {
