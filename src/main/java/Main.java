@@ -69,6 +69,8 @@ public class Main {
                     }
                     Configs.setReplicationInfo("role", "slave");
                     argsMap.put("replicaof", replicaOf);
+                    argsMap.put("master_host", parts[0]);
+                    argsMap.put("master_port", parts[1]);
                 }
             }
         }
@@ -111,6 +113,10 @@ public class Main {
             Configs.setReplicationInfo("role", "master");
             Configs.setReplicationInfo("master_replid", "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb");
             Configs.setReplicationInfo("master_repl_offset", String.valueOf(0));
+        } else {
+            String masterHost = argsMap.get("master_host");
+            int masterPort = Integer.parseInt(argsMap.get("master_port"));
+            ReplicationHandler.performHandshake(masterHost, masterPort);
         }
     }
 }
