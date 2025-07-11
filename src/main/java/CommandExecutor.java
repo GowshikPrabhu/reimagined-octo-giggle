@@ -201,12 +201,12 @@ public class CommandExecutor {
     }
 
     public String handlePSyncRequest(List<String> args) {
-        if (args.isEmpty()) {
+        if (args.isEmpty() || args.size() < 2) {
             return RESPEncoder.encodeError("ERR wrong number of arguments for 'psync' command");
         }
         String replicationID = args.getFirst();
         String offset = args.get(1);
         LoggingService.logInfo("Got PSYNC with replicationID: " + replicationID + " and offset: " + offset);
-        return RESPEncoder.encodeSimpleString("FULLRESYNC " + replicationID + " 0");
+        return RESPEncoder.encodeSimpleString("FULLRESYNC " + Configs.getReplicationInfo("master_replid") + " 0");
     }
 }
