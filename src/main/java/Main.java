@@ -58,6 +58,19 @@ public class Main {
                         LoggingService.logError("Invalid port number: " + portStr);
                     }
                 }
+                case "--replicaof" -> {
+                    if (++i >= len) {
+                        LoggingService.logError("Missing replicaof argument after --replicaof");
+                        throw new IllegalArgumentException("Missing replicaof argument after --replicaof");
+                    }
+                    String replicaOf = args[i];
+                    String[] parts = replicaOf.split(" ");
+                    if (parts.length != 2) {
+                        LoggingService.logError("Invalid replicaof argument: " + replicaOf);
+                        throw new IllegalArgumentException("Invalid replicaof argument: " + replicaOf);
+                    }
+                    Configs.setReplicationInfo("role", "slave");
+                }
             }
         }
 
