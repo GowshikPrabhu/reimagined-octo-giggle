@@ -22,6 +22,7 @@ public class CommandExecutor {
         commandHandlers.put("keys", this::handleKeysRequest);
         commandHandlers.put("info", this::handleInfoRequest);
         commandHandlers.put("replconf", this::handleReplConfRequest);
+        commandHandlers.put("psync", this::handlePSyncRequest);
     }
 
     public String executeCommand(String command, List<String> args) {
@@ -197,5 +198,15 @@ public class CommandExecutor {
         } else {
             return RESPEncoder.encodeError("ERR unknown replconf subcommand '" + arg + "'");
         }
+    }
+
+    public String handlePSyncRequest(List<String> args) {
+        if (args.isEmpty()) {
+            return RESPEncoder.encodeError("ERR wrong number of arguments for 'psync' command");
+        }
+        String replicationID = args.getFirst();
+        String offset = args.get(1);
+        LoggingService.logInfo("Got PSYNC with replicationID: " + replicationID + " and offset: " + offset);
+        return RESPEncoder.encodeSimpleString("FULLRESYNC " + replicationID + " 0");
     }
 }

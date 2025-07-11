@@ -46,13 +46,16 @@ public class ReplicationHandler {
             OutputStream outputStream = socket.getOutputStream();
             BufferedInputStream inputStream = new BufferedInputStream(socket.getInputStream());
 
-            sendCommandAndExpectRawResponse(outputStream, inputStream, Collections.singletonList("PING"), "+PONG\r\n", "PING");
+            sendCommandAndExpectRawResponse(outputStream, inputStream, Collections.singletonList("PING"), "PING");
 
             List<String> replconfPortCmd = List.of("REPLCONF", "listening-port", String.valueOf(localServerPort));
-            sendCommandAndExpectRawResponse(outputStream, inputStream, replconfPortCmd, "+OK\r\n", "REPLCONF listening-port");
+            sendCommandAndExpectRawResponse(outputStream, inputStream, replconfPortCmd, "REPLCONF listening-port");
 
             List<String> replconfCapaCmd = List.of("REPLCONF", "capa", "psync2");
-            sendCommandAndExpectRawResponse(outputStream, inputStream, replconfCapaCmd, "+OK\r\n", "REPLCONF capa psync2");
+            sendCommandAndExpectRawResponse(outputStream, inputStream, replconfCapaCmd, "REPLCONF capa psync2");
+
+            List<String> psyncCmd = List.of("PSYNC", "?", "-1");
+            sendCommandAndExpectRawResponse(outputStream, inputStream, psyncCmd, "PSYNC ? -1");
 
             LoggingService.logInfo("Replication handshake completed successfully with master: " + masterHost + ":" + masterPort);
         } catch (IOException e) {
@@ -65,7 +68,6 @@ public class ReplicationHandler {
             OutputStream outputStream,
             BufferedInputStream inputStream,
             List<String> commandParts,
-            String expectedRawResponse,
             String commandDescription) throws IOException {
 
         String encodedCommand = RESPEncoder.encodeStringArray(commandParts);
@@ -75,13 +77,6 @@ public class ReplicationHandler {
 
         String rawResponse = readRawRESPMessage(inputStream);
         LoggingService.logInfo("Received raw response for '" + commandDescription + "': " + rawResponse.trim());
-
-        if (!rawResponse.equals(expectedRawResponse)) {
-            String errorMessage = String.format("Unexpected response for '%s'. Expected '%s', got '%s'.",
-                    commandDescription, expectedRawResponse.trim(), rawResponse.trim());
-            LoggingService.logError(errorMessage, null);
-            throw new IOException(errorMessage);
-        }
     }
 
     private String readRawRESPMessage(BufferedInputStream inputStream) throws IOException {
