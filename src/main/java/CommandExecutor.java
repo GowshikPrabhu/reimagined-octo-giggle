@@ -20,6 +20,7 @@ public class CommandExecutor {
         commandHandlers.put("get", this::handleGetRequest);
         commandHandlers.put("config", this::handleConfigRequest);
         commandHandlers.put("keys", this::handleKeysRequest);
+        commandHandlers.put("info", this::handleInfoRequest);
     }
 
     public String executeCommand(String command, List<String> args) {
@@ -35,7 +36,7 @@ public class CommandExecutor {
     }
 
     private String handleCommandsRequest(List<String> args) {
-        List<String> commands = List.of("command", "ping", "echo", "set", "get", "config", "keys");
+        List<String> commands = List.of("command", "ping", "echo", "set", "get", "config", "keys", "info");
         if (args.isEmpty()) {
             LoggingService.logFine("Sending command list COMMAND.");
             return RESPEncoder.encodeStringArray(commands);
@@ -155,5 +156,18 @@ public class CommandExecutor {
         }
         LoggingService.logFine("Sending keys list for prefix '" + arg + "': " + resultKeys);
         return RESPEncoder.encodeStringArray(resultKeys);
+    }
+
+    public String handleInfoRequest(List<String> args) {
+        if (args.isEmpty()) {
+            return RESPEncoder.encodeError("ERR empty info command unimplemented");
+        }
+        String arg = args.getFirst();
+        if (arg.equalsIgnoreCase("replication")) {
+            String role = Configs.getReplicationInfo("role");
+            return RESPEncoder.encodeBulkString("role:" + role);
+        } else {
+            return RESPEncoder.encodeError("ERR unknown info subcommand '" + arg + "'");
+        }
     }
 }

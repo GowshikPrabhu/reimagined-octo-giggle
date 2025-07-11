@@ -9,11 +9,25 @@ public class Configs {
 
     private static final Map<String, String> config = new HashMap<>();
 
+    private static final Map<String, String> replicationInfo = new HashMap<>();
+
     public static String getConfiguration(String key) {
         return config.get(key);
     }
 
     public static void setConfiguration(String key, String value) {
         config.put(key, value);
+    }
+
+    public static String getReplicationInfo(String key) {
+        return replicationInfo.get(key);
+    }
+
+    public static void setReplicationInfo(String key, String value) {
+        replicationInfo.put(key, value);
+    }
+
+    static {
+        replicationInfo.put("role", "master");
     }
 }
