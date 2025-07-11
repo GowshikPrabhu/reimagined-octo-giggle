@@ -164,8 +164,11 @@ public class CommandExecutor {
         }
         String arg = args.getFirst();
         if (arg.equalsIgnoreCase("replication")) {
-            String role = Configs.getReplicationInfo("role");
-            return RESPEncoder.encodeBulkString("role:" + role);
+            StringBuilder sb = new StringBuilder();
+            for (Map.Entry<String, String> entry : Configs.getReplicationInfo().entrySet()) {
+                sb.append(entry.getKey()).append(":").append(entry.getValue()).append("\n");
+            }
+            return RESPEncoder.encodeBulkString(sb.toString());
         } else {
             return RESPEncoder.encodeError("ERR unknown info subcommand '" + arg + "'");
         }

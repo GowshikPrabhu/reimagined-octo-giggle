@@ -12,9 +12,7 @@ public class Main {
     public static void main(String[] args) throws IOException {
         LoggingService.logInfo("Logs from your program will appear here!");
 
-        if (args.length > 0) {
-            processArguments(args);
-        }
+        processArguments(args);
 
         try (EventLoop eventLoop = new EventLoop(port)) {
             eventLoop.start();
@@ -70,6 +68,7 @@ public class Main {
                         throw new IllegalArgumentException("Invalid replicaof argument: " + replicaOf);
                     }
                     Configs.setReplicationInfo("role", "slave");
+                    argsMap.put("replicaof", replicaOf);
                 }
             }
         }
@@ -106,6 +105,12 @@ public class Main {
             String dir = argsMap.getOrDefault("dir", ".");
             String fileName = argsMap.getOrDefault("dbfilename", "redis.rdb");
             rdbParser.parse(Path.of(dir, fileName).toAbsolutePath());
+        }
+
+        if (!argsMap.containsKey("replicaof")) {
+            Configs.setReplicationInfo("role", "master");
+            Configs.setReplicationInfo("master_replid", "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb");
+            Configs.setReplicationInfo("master_repl_offset", String.valueOf(0));
         }
     }
 }

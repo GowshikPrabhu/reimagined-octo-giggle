@@ -27,7 +27,7 @@ public class Configs {
         replicationInfo.put(key, value);
     }
 
-    static {
-        replicationInfo.put("role", "master");
+    public static Map<String, String> getReplicationInfo() {
+        return replicationInfo;
     }
 }
