@@ -7,6 +7,8 @@ import java.util.Map;
 
 public class Main {
 
+    static int port = 6379;
+
     public static void main(String[] args) throws IOException {
         LoggingService.logInfo("Logs from your program will appear here!");
 
@@ -14,7 +16,7 @@ public class Main {
             processArguments(args);
         }
 
-        try (EventLoop eventLoop = new EventLoop(6379)) {
+        try (EventLoop eventLoop = new EventLoop(port)) {
             eventLoop.start();
         } catch (Exception e) {
             LoggingService.logError("Error: " + e.getMessage(), e);
@@ -25,22 +27,37 @@ public class Main {
         Map<String, String> argsMap = new HashMap<>();
         for (int i = 0, len = args.length; i < len; i++) {
             String arg = args[i];
-            if (arg.equals("--dir")) {
-                if (++i >= len) {
-                    LoggingService.logError("Missing dir location argument after --dir");
-                    throw new IllegalArgumentException("Missing dir location argument after --dir");
+            switch (arg) {
+                case "--dir" -> {
+                    if (++i >= len) {
+                        LoggingService.logError("Missing dir location argument after --dir");
+                        throw new IllegalArgumentException("Missing dir location argument after --dir");
+                    }
+                    String dirLocation = args[i];
+                    Configs.setConfiguration("dir", dirLocation);
+                    argsMap.put("dir", dirLocation);
                 }
-                String dirLocation = args[i];
-                Configs.setConfiguration("dir", dirLocation);
-                argsMap.put("dir", dirLocation);
-            } else if (arg.equals("--dbfilename")) {
-                if (++i >= len) {
-                    LoggingService.logError("Missing db filename argument after --dbfilename");
-                    throw new IllegalArgumentException("Missing db filename argument after --dbfilename");
+                case "--dbfilename" -> {
+                    if (++i >= len) {
+                        LoggingService.logError("Missing db filename argument after --dbfilename");
+                        throw new IllegalArgumentException("Missing db filename argument after --dbfilename");
+                    }
+                    String dbFileName = args[i];
+                    Configs.setConfiguration("dbfilename", dbFileName);
+                    argsMap.put("dbfilename", dbFileName);
                 }
-                String dbFileName = args[i];
-                Configs.setConfiguration("dbfilename", dbFileName);
-                argsMap.put("dbfilename", dbFileName);
+                case "--port" -> {
+                    if (++i >= len) {
+                        LoggingService.logError("Missing port argument after --port");
+                        throw new IllegalArgumentException("Missing port argument after --port");
+                    }
+                    String portStr = args[i];
+                    try {
+                        port = Integer.parseInt(portStr);
+                    } catch (NumberFormatException e) {
+                        LoggingService.logError("Invalid port number: " + portStr);
+                    }
+                }
             }
         }
 
