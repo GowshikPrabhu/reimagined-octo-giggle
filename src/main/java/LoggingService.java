@@ -45,4 +45,8 @@ public class LoggingService {
     public static void logFine(String message) {
         logger.log(Level.FINE, message);
     }
+
+    public static void logWarn(String message) {
+        logger.log(Level.WARNING, message);
+    }
 }

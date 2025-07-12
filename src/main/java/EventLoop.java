@@ -1,9 +1,19 @@
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.channels.*;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.function.Consumer;
 
 public class EventLoop implements AutoCloseable {
 
@@ -16,23 +26,43 @@ public class EventLoop implements AutoCloseable {
     private final Map<SocketChannel, ByteBuffer> clientReadBuffers = new HashMap<>();
     private final Map<SocketChannel, Queue<ByteBuffer>> clientWriteBuffers = new HashMap<>();
 
+    private SocketChannel masterChannel = null;
+    private ByteBuffer masterReadBuffer = null;
+    private final Queue<ByteBuffer> masterWriteQueue = new LinkedList<>();
+
+
     public EventLoop(int port) throws IOException {
         commandParser = new CommandParser();
         commandExecutor = new CommandExecutor();
         expiry = new Expiry();
-
         selector = Selector.open();
+
+        replicationHandler = new ReplicationHandler(port, selector, this::queueWriteToMaster, this::queueReadForMaster, commandExecutor);
+        commandExecutor.setReplicationNotifier(replicationHandler);
+        replicationHandler.setQueueWriteToSlavesCallback(entry -> queueWriteToClient(entry.getKey(), entry.getValue()));
+
         ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.bind(new InetSocketAddress(port));
         serverSocketChannel.configureBlocking(false);
         LoggingService.logInfo("Server listening on port " + port);
         serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
-
-        replicationHandler = new ReplicationHandler(port);
     }
 
     public void start() throws IOException {
-        replicationHandler.handle();
+        String role = Configs.getReplicationInfo("role");
+        if ("slave".equalsIgnoreCase(role)) {
+            try {
+                masterChannel = replicationHandler.initiateHandshake();
+                if (masterChannel != null) {
+                    masterReadBuffer = ByteBuffer.allocate(Configs.READ_BUFFER_SIZE);
+                }
+            } catch (IOException e) {
+                LoggingService.logError("Failed to initiate replication handshake: " + e.getMessage(), e);
+            }
+        } else {
+            LoggingService.logInfo("Server is not configured as a slave. Skipping replication handshake.");
+        }
+
 
         LoggingService.logInfo("Starting event loop...");
 
@@ -61,6 +91,8 @@ public class EventLoop implements AutoCloseable {
             try {
                 if (key.isAcceptable()) {
                     handleAccept(key);
+                } else if (key.isConnectable()) {
+                    handleConnect(key);
                 } else if (key.isReadable()) {
                     handleRead(key);
                 } else if (key.isWritable()) {
@@ -73,6 +105,22 @@ public class EventLoop implements AutoCloseable {
                 LoggingService.logError("Unexpected error handling key", e);
                 closeChannel(key);
             }
+        }
+    }
+
+    private void handleConnect(SelectionKey key) throws IOException {
+        SocketChannel channel = (SocketChannel) key.channel();
+        try {
+            if (channel.isConnectionPending()) {
+                channel.finishConnect();
+            }
+            LoggingService.logInfo("Connection established with " + channel.getRemoteAddress());
+            key.interestOps(SelectionKey.OP_READ);
+            replicationHandler.onConnected(channel);
+        } catch (IOException e) {
+            LoggingService.logError("Failed to establish connection: " + e.getMessage(), e);
+            replicationHandler.onConnectionFailed(channel, e);
+            closeChannel(key);
         }
     }
 
@@ -95,6 +143,16 @@ public class EventLoop implements AutoCloseable {
     }
 
     private void handleRead(SelectionKey key) throws IOException {
+        SocketChannel channel = (SocketChannel) key.channel();
+
+        if (channel == masterChannel) {
+            handleMasterRead(key);
+        } else {
+            handleClientRead(key);
+        }
+    }
+
+    private void handleClientRead(SelectionKey key) {
         SocketChannel clientChannel = (SocketChannel) key.channel();
         ByteBuffer readBuffer = clientReadBuffers.get(clientChannel);
 
@@ -137,17 +195,10 @@ public class EventLoop implements AutoCloseable {
                 LoggingService.logInfo(String.format("Client %s: received command '%s', args: %s",
                         clientChannel.getRemoteAddress(), cmd, args));
 
-                class Writer implements ResponseWriter {
-                    @Override
-                    public void write(String response) {
-                        queueWrite(clientChannel, response);
-                    }
-                    @Override
-                    public void write(byte[] response) {
-                        queueWrite(clientChannel, response);
-                    }
-                }
-                commandExecutor.executeCommand(cmd, args, new Writer());
+                Consumer<String> stringWriter = (String s) -> queueWrite(clientChannel, s);
+                Consumer<byte[]> byteWriter = (byte[] b) -> queueWrite(clientChannel, b);
+
+                commandExecutor.executeCommand(clientChannel, cmd, args, stringWriter, byteWriter);
             }
         } catch (IOException e) {
             LoggingService.logError("Protocol parsing error: " + e.getMessage(), e);
@@ -166,21 +217,74 @@ public class EventLoop implements AutoCloseable {
         }
     }
 
+    private void handleMasterRead(SelectionKey key) {
+        SocketChannel channel = (SocketChannel) key.channel();
+        int bytesRead;
+        try {
+            bytesRead = channel.read(masterReadBuffer);
+        } catch (IOException e) {
+            LoggingService.logError("Error reading from master channel: " + e.getMessage(), e);
+            replicationHandler.onReadError(channel, e);
+            closeChannel(key);
+            return;
+        }
+
+        if (bytesRead == -1) {
+            LoggingService.logInfo("EOF reached (master disconnected).");
+            replicationHandler.onMasterDisconnected(channel);
+            closeChannel(key);
+            return;
+        }
+
+        masterReadBuffer.flip();
+        replicationHandler.onRead(channel, masterReadBuffer);
+        if (masterReadBuffer.hasRemaining()) {
+            masterReadBuffer.compact();
+        } else {
+            masterReadBuffer.clear();
+        }
+    }
+
     private void handleWrite(SelectionKey key) throws IOException {
+        SocketChannel channel = (SocketChannel) key.channel();
+
+        if (channel == masterChannel) {
+            handleMasterWrite(key);
+        } else {
+            handleClientWrite(key);
+        }
+    }
+
+    private void handleClientWrite(SelectionKey key) throws IOException {
         SocketChannel clientChannel = (SocketChannel) key.channel();
         Queue<ByteBuffer> writeQueue = clientWriteBuffers.get(clientChannel);
 
-        while (!writeQueue.isEmpty()) {
+        while (writeQueue != null && !writeQueue.isEmpty()) {
             ByteBuffer buffer = writeQueue.peek();
             clientChannel.write(buffer);
             if (buffer.hasRemaining()) {
-                // Couldn’t write all data; leave OP_WRITE registered
                 return;
             }
             writeQueue.poll();
         }
 
         key.interestOps(SelectionKey.OP_READ);
+    }
+
+    private void handleMasterWrite(SelectionKey key) throws IOException {
+        SocketChannel channel = (SocketChannel) key.channel();
+
+        while (!masterWriteQueue.isEmpty()) {
+            ByteBuffer buffer = masterWriteQueue.peek();
+            channel.write(buffer);
+            if (buffer.hasRemaining()) {
+                return;
+            }
+            masterWriteQueue.poll();
+        }
+
+        key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE | SelectionKey.OP_READ);
+        replicationHandler.onWriteCompleted(channel);
     }
 
     private void queueWrite(SocketChannel channel, String response) {
@@ -215,6 +319,41 @@ public class EventLoop implements AutoCloseable {
         }
     }
 
+    private void queueWriteToMaster(ByteBuffer buffer) {
+        if (masterChannel == null || !masterChannel.isConnected()) {
+            LoggingService.logError("Attempted to queue write to master, but master channel is not connected.", null);
+            return;
+        }
+        masterWriteQueue.add(buffer);
+
+        SelectionKey key = masterChannel.keyFor(selector);
+        if (key != null && key.isValid()) {
+            key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+            selector.wakeup();
+        }
+    }
+
+    private void queueWriteToClient(SocketChannel channel, ByteBuffer buffer) {
+        Queue<ByteBuffer> writeQueue = clientWriteBuffers.get(channel);
+        if (writeQueue == null) {
+            LoggingService.logError("Write queue missing for client: " + channel);
+            return;
+        }
+
+        writeQueue.add(buffer);
+
+        SelectionKey key = channel.keyFor(selector);
+        if (key != null && key.isValid()) {
+            key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+            selector.wakeup();
+        }
+    }
+
+    private ByteBuffer queueReadForMaster() {
+        return masterReadBuffer;
+    }
+
+
     private void closeChannel(SelectionKey key) {
         SocketChannel channel = (SocketChannel) key.channel();
         key.cancel();
@@ -232,8 +371,16 @@ public class EventLoop implements AutoCloseable {
         } catch (IOException e) {
             LoggingService.logError("Error closing channel", e);
         } finally {
-            clientReadBuffers.remove(channel);
-            clientWriteBuffers.remove(channel);
+            if (channel == masterChannel) {
+                masterChannel = null;
+                masterReadBuffer = null;
+                masterWriteQueue.clear();
+                replicationHandler.onMasterDisconnected(channel);
+            } else {
+                clientReadBuffers.remove(channel);
+                clientWriteBuffers.remove(channel);
+                replicationHandler.removeConnectedSlave(channel);
+            }
         }
     }
 
