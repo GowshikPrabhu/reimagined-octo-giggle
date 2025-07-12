@@ -137,8 +137,17 @@ public class EventLoop implements AutoCloseable {
                 LoggingService.logInfo(String.format("Client %s: received command '%s', args: %s",
                         clientChannel.getRemoteAddress(), cmd, args));
 
-                String resp = commandExecutor.executeCommand(cmd, args);
-                queueWrite(clientChannel, resp);
+                class Writer implements ResponseWriter {
+                    @Override
+                    public void write(String response) {
+                        queueWrite(clientChannel, response);
+                    }
+                    @Override
+                    public void write(byte[] response) {
+                        queueWrite(clientChannel, response);
+                    }
+                }
+                commandExecutor.executeCommand(cmd, args, new Writer());
             }
         } catch (IOException e) {
             LoggingService.logError("Protocol parsing error: " + e.getMessage(), e);
@@ -182,6 +191,22 @@ public class EventLoop implements AutoCloseable {
         }
 
         writeQueue.add(ByteBuffer.wrap(response.getBytes(StandardCharsets.UTF_8)));
+
+        SelectionKey key = channel.keyFor(selector);
+        if (key != null && key.isValid()) {
+            key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+            selector.wakeup();
+        }
+    }
+
+    private void queueWrite(SocketChannel channel, byte[] response) {
+        Queue<ByteBuffer> writeQueue = clientWriteBuffers.get(channel);
+        if (writeQueue == null) {
+            LoggingService.logError("Write queue missing for client: " + channel);
+            return;
+        }
+
+        writeQueue.add(ByteBuffer.wrap(response));
 
         SelectionKey key = channel.keyFor(selector);
         if (key != null && key.isValid()) {

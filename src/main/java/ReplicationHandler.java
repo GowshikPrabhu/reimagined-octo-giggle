@@ -4,6 +4,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -56,6 +57,8 @@ public class ReplicationHandler {
 
             List<String> psyncCmd = List.of("PSYNC", "?", "-1");
             sendCommandAndExpectRawResponse(outputStream, inputStream, psyncCmd, "PSYNC ? -1");
+            String resp = readRawRESPBinary(inputStream);
+            LoggingService.logInfo("Received RDB response: " + resp);
 
             LoggingService.logInfo("Replication handshake completed successfully with master: " + masterHost + ":" + masterPort);
         } catch (IOException e) {
@@ -174,5 +177,54 @@ public class ReplicationHandler {
             }
         }
         throw new IOException("End of stream reached while reading RESP line.");
+    }
+
+    private String readRawRESPBinary(BufferedInputStream inputStream) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        int b;
+        int bytesReadTotal = 0;
+        final int MAX_RESP_MESSAGE_SIZE = Configs.READ_BUFFER_SIZE * 4;
+
+        inputStream.mark(1);
+        b = inputStream.read();
+        if (b == -1) {
+            throw new IOException("End of stream reached before any data for RESP message.");
+        }
+        char typeChar = (char) b;
+        sb.append(typeChar);
+        bytesReadTotal++;
+
+        if (typeChar == '$') {
+            String lengthLine = readLine(inputStream, sb);
+            int length;
+            try {
+                length = Integer.parseInt(lengthLine.substring(1, lengthLine.length() - 2));
+                LoggingService.logInfo("Bulk string length: " + length);
+            } catch (NumberFormatException | IndexOutOfBoundsException e) {
+                throw new IOException("Malformed bulk string length: '" + lengthLine.trim() + "'", e);
+            }
+
+            if (length == -1) {
+                return sb.toString();
+            }
+
+            byte[] dataBuffer = new byte[length];
+            int totalDataBytesRead = 0;
+            while (totalDataBytesRead < length) {
+                int read = inputStream.read(dataBuffer, totalDataBytesRead, (length) - totalDataBytesRead);
+                if (read == -1) {
+                    throw new IOException("End of stream reached while reading bulk string data.");
+                }
+                totalDataBytesRead += read;
+                if (bytesReadTotal + totalDataBytesRead > MAX_RESP_MESSAGE_SIZE) {
+                    throw new IOException("Bulk string message too long, exceeding " + MAX_RESP_MESSAGE_SIZE + " bytes.");
+                }
+                String binaryStr = new String(dataBuffer, StandardCharsets.UTF_8);
+                sb.append(binaryStr);
+            }
+            return sb.toString();
+        } else {
+            throw new IOException("Unknown or unsupported RESP type: '" + typeChar + "' (ASCII: " + (int)typeChar + ")");
+        }
     }
 }

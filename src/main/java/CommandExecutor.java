@@ -1,10 +1,11 @@
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.regex.Pattern;
 
 public class CommandExecutor {
 
     public interface CommandHandler {
-        String handleCommand(List<String> args);
+        void handleCommand(List<String> args, ResponseWriter responseWriter);
     }
 
     private final Cache cache;
@@ -25,28 +26,28 @@ public class CommandExecutor {
         commandHandlers.put("psync", this::handlePSyncRequest);
     }
 
-    public String executeCommand(String command, List<String> args) {
+    public void executeCommand(String command, List<String> args, ResponseWriter responseWriter) {
         command = command.toLowerCase();
         CommandHandler handler = commandHandlers.get(command);
 
         if (handler != null) {
-            return handler.handleCommand(args);
+            handler.handleCommand(args, responseWriter);
         } else {
             LoggingService.logError("Unknown command: " + command + " with args: " + args);
-            return RESPEncoder.encodeError("ERR unknown command '" + command + "'");
+            responseWriter.write(RESPEncoder.encodeError("ERR unknown command '" + command + "'"));
         }
     }
 
-    private String handleCommandsRequest(List<String> args) {
+    private void handleCommandsRequest(List<String> args, ResponseWriter responseWriter) {
         List<String> commands = List.of("command", "ping", "echo", "set", "get", "config", "keys", "info");
         if (args.isEmpty()) {
             LoggingService.logFine("Sending command list COMMAND.");
-            return RESPEncoder.encodeStringArray(commands);
+            responseWriter.write(RESPEncoder.encodeStringArray(commands));
         } else {
             String arg = args.getFirst();
             if (arg.equalsIgnoreCase("docs")) {
                 if (args.size() > 1) {
-                    return RESPEncoder.encodeError("ERR Unimplemented subcommand 'docs' for 'command' command");
+                    responseWriter.write(RESPEncoder.encodeError("ERR Unimplemented subcommand 'docs' for 'command' command"));
                 }
                 Map<String, Map<String, String>> commandDocs = new HashMap<>();
                 for (String commandName : commands) {
@@ -55,31 +56,31 @@ public class CommandExecutor {
                     commandDocs.put(commandName, commandDoc);
                 }
                 LoggingService.logFine("Sending command list DOCUMENTATION.");
-                return RESPEncoder.encodeMap(commandDocs);
+                responseWriter.write(RESPEncoder.encodeMap(commandDocs));
 
             }
-            return RESPEncoder.encodeError("ERR unknown command '" + arg + "' for 'command' command");
+            responseWriter.write(RESPEncoder.encodeError("ERR unknown command '" + arg + "' for 'command' command"));
         }
     }
 
-    private String handlePing(List<String> args) {
+    private void handlePing(List<String> args, ResponseWriter responseWriter) {
         String response = args.isEmpty() ? "PONG" : args.getFirst();
         LoggingService.logFine("Responding to PING with: " + response);
-        return RESPEncoder.encodeSimpleString(response);
+        responseWriter.write(RESPEncoder.encodeSimpleString(response));
     }
 
-    private String handleEchoRequest(List<String> args) {
+    private void handleEchoRequest(List<String> args, ResponseWriter responseWriter) {
         if (args.isEmpty()) {
-            return RESPEncoder.encodeError("ERR wrong number of arguments for 'echo' command");
+            responseWriter.write(RESPEncoder.encodeError("ERR wrong number of arguments for 'echo' command"));
         }
         String arg = args.getFirst();
         LoggingService.logFine("Echoing: " + arg);
-        return RESPEncoder.encodeBulkString(arg);
+        responseWriter.write(RESPEncoder.encodeBulkString(arg));
     }
 
-    private String handleSetRequest(List<String> args) {
+    private void handleSetRequest(List<String> args, ResponseWriter responseWriter) {
         if (args.size() < 2) {
-            return RESPEncoder.encodeError("ERR wrong number of arguments for 'set' command");
+            responseWriter.write(RESPEncoder.encodeError("ERR wrong number of arguments for 'set' command"));
         }
 
         String key = args.getFirst();
@@ -90,62 +91,61 @@ public class CommandExecutor {
             String option = args.get(i).toLowerCase();
             if (option.equals("px")) {
                 if (i + 1 >= args.size()) {
-                    return RESPEncoder.encodeError("ERR syntax error: PX requires a millisecond timeout");
+                    responseWriter.write(RESPEncoder.encodeError("ERR syntax error: PX requires a millisecond timeout"));
                 }
                 try {
                     expiresMillis = Long.parseLong(args.get(i + 1));
                     if (expiresMillis <= 0) {
-                        return RESPEncoder.encodeError("ERR PX milliseconds must be positive");
+                        responseWriter.write(RESPEncoder.encodeError("ERR PX milliseconds must be positive"));
                     }
                 } catch (NumberFormatException e) {
-                    return RESPEncoder.encodeError("ERR PX argument must be a number");
+                    responseWriter.write(RESPEncoder.encodeError("ERR PX argument must be a number"));
                 }
                 i++;
             } else {
-                return RESPEncoder.encodeError("ERR unknown option '" + option + "' for 'set' command");
+                responseWriter.write(RESPEncoder.encodeError("ERR unknown option '" + option + "' for 'set' command"));
             }
         }
 
         cache.put(key, value, expiresMillis);
         LoggingService.logFine("Set key '" + key + "' with TTL: " + expiresMillis + "ms");
-        return RESPEncoder.encodeSimpleString("OK");
+        responseWriter.write(RESPEncoder.encodeSimpleString("OK"));
     }
 
-    private String handleGetRequest(List<String> args) {
+    private void handleGetRequest(List<String> args, ResponseWriter responseWriter) {
         if (args.isEmpty()) {
-            return RESPEncoder.encodeError("ERR wrong number of arguments for 'get' command");
+            responseWriter.write(RESPEncoder.encodeError("ERR wrong number of arguments for 'get' command"));
         }
         String key = args.getFirst();
         String value = cache.get(key);
-        return RESPEncoder.encodeBulkString(value);
+        responseWriter.write(RESPEncoder.encodeBulkString(value));
     }
 
-    public String handleConfigRequest(List<String> args) {
+    private void handleConfigRequest(List<String> args, ResponseWriter responseWriter) {
         if (args.size() < 2) {
-            return RESPEncoder.encodeError("ERR wrong number of arguments for 'config' command");
+            responseWriter.write(RESPEncoder.encodeError("ERR wrong number of arguments for 'config' command"));
         }
         String subCommand = args.getFirst().toLowerCase();
         if (subCommand.equals("get")) {
             String key = args.get(1);
             String value = Configs.getConfiguration(key);
-            return value == null ? RESPEncoder.encodeStringArray(Collections.emptyList())
-                    : RESPEncoder.encodeStringArray(List.of(key, value));
+            responseWriter.write(value == null ? RESPEncoder.encodeStringArray(Collections.emptyList()) : RESPEncoder.encodeStringArray(List.of(key, value)));
         } else if (subCommand.equals("set")) {
             if (args.size() < 3) {
-                return RESPEncoder.encodeError("ERR wrong number of arguments for 'config set' command");
+                responseWriter.write(RESPEncoder.encodeError("ERR wrong number of arguments for 'config set' command"));
             }
             String key = args.get(1);
             String value = args.get(2);
             Configs.setConfiguration(key, value);
-            return RESPEncoder.encodeSimpleString("OK");
+            responseWriter.write(RESPEncoder.encodeSimpleString("OK"));
         } else {
-            return RESPEncoder.encodeError("ERR unknown sub command '" + subCommand + "' for 'config' command");
+            responseWriter.write(RESPEncoder.encodeError("ERR unknown sub command '" + subCommand + "' for 'config' command"));
         }
     }
 
-    public String handleKeysRequest(List<String> args) {
+    private void handleKeysRequest(List<String> args, ResponseWriter responseWriter) {
         if (args.isEmpty()) {
-            return RESPEncoder.encodeError("ERR wrong number of arguments for 'keys' command");
+            responseWriter.write(RESPEncoder.encodeError("ERR wrong number of arguments for 'keys' command"));
         }
         String arg = args.getFirst();
         List<String> resultKeys;
@@ -157,12 +157,12 @@ public class CommandExecutor {
             resultKeys = Arrays.stream(cache.keys()).filter(key -> pattern.matcher(key).matches()).toList();
         }
         LoggingService.logFine("Sending keys list for prefix '" + arg + "': " + resultKeys);
-        return RESPEncoder.encodeStringArray(resultKeys);
+        responseWriter.write(RESPEncoder.encodeStringArray(resultKeys));
     }
 
-    public String handleInfoRequest(List<String> args) {
+    private void handleInfoRequest(List<String> args, ResponseWriter responseWriter) {
         if (args.isEmpty()) {
-            return RESPEncoder.encodeError("ERR empty info command unimplemented");
+            responseWriter.write(RESPEncoder.encodeError("ERR empty info command unimplemented"));
         }
         String arg = args.getFirst();
         if (arg.equalsIgnoreCase("replication")) {
@@ -170,43 +170,48 @@ public class CommandExecutor {
             for (Map.Entry<String, String> entry : Configs.getReplicationInfo().entrySet()) {
                 sb.append(entry.getKey()).append(":").append(entry.getValue()).append("\n");
             }
-            return RESPEncoder.encodeBulkString(sb.toString());
+            responseWriter.write(RESPEncoder.encodeBulkString(sb.toString()));
         } else {
-            return RESPEncoder.encodeError("ERR unknown info subcommand '" + arg + "'");
+            responseWriter.write(RESPEncoder.encodeError("ERR unknown info subcommand '" + arg + "'"));
         }
     }
 
-    public String handleReplConfRequest(List<String> args) {
+    private void handleReplConfRequest(List<String> args, ResponseWriter responseWriter) {
         if (args.isEmpty()) {
-            return RESPEncoder.encodeError("ERR empty replconf command unimplemented");
+            responseWriter.write(RESPEncoder.encodeError("ERR empty replconf command unimplemented"));
         }
         String arg = args.getFirst();
         if (arg.equalsIgnoreCase("listening-port")) {
             if (args.size() < 2) {
-                return RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf listening-port' command");
+                responseWriter.write(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf listening-port' command"));
             }
             arg = args.get(1);
             LoggingService.logInfo("Got REPLCONF with listening-port: " + arg);
-            return RESPEncoder.encodeSimpleString("OK");
+            responseWriter.write(RESPEncoder.encodeSimpleString("OK"));
         } else if (arg.equalsIgnoreCase("capa")) {
             if (args.size() < 2) {
-                return RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf capa' command");
+                responseWriter.write(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf capa' command"));
             }
             arg = args.get(1);
             LoggingService.logInfo("Got REPLCONF with capa: " + arg);
-            return RESPEncoder.encodeSimpleString("OK");
+            responseWriter.write(RESPEncoder.encodeSimpleString("OK"));
         } else {
-            return RESPEncoder.encodeError("ERR unknown replconf subcommand '" + arg + "'");
+            responseWriter.write(RESPEncoder.encodeError("ERR unknown replconf subcommand '" + arg + "'"));
         }
     }
 
-    public String handlePSyncRequest(List<String> args) {
+    private void handlePSyncRequest(List<String> args, ResponseWriter responseWriter) {
         if (args.isEmpty() || args.size() < 2) {
-            return RESPEncoder.encodeError("ERR wrong number of arguments for 'psync' command");
+            responseWriter.write(RESPEncoder.encodeError("ERR wrong number of arguments for 'psync' command"));
         }
         String replicationID = args.getFirst();
         String offset = args.get(1);
         LoggingService.logInfo("Got PSYNC with replicationID: " + replicationID + " and offset: " + offset);
-        return RESPEncoder.encodeSimpleString("FULLRESYNC " + Configs.getReplicationInfo("master_replid") + " 0");
+        responseWriter.write(RESPEncoder.encodeSimpleString("FULLRESYNC " + Configs.getReplicationInfo("master_replid") + " 0"));
+        String dummyHex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
+        byte[] bytes = HexFormat.of().parseHex(dummyHex);
+        byte[] rdb = RESPEncoder.encodeBinary(bytes);
+        LoggingService.logInfo("Sending dummy RDB: " + rdb);
+        responseWriter.write(rdb);
     }
 }

@@ -1,3 +1,5 @@
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -41,7 +43,7 @@ public class RESPEncoder {
                 case Long l -> sb.append(encodeInteger(l));
                 case Integer i -> sb.append(encodeInteger(i));
                 case null, default ->
-                        throw new IllegalArgumentException("Unsupported key type: " + key.getClass().getName());
+                        throw new IllegalArgumentException("Unsupported key type: " + key);
             }
             Object value = entry.getValue();
             switch (value) {
@@ -51,9 +53,18 @@ public class RESPEncoder {
                 case Map<?, ?> m -> sb.append(encodeMap(m));
                 case List<?> l -> sb.append(encodeStringArray(l));
                 case null, default ->
-                        throw new IllegalArgumentException("Unsupported value type: " + value.getClass().getName());
+                        throw new IllegalArgumentException("Unsupported value type: " + value);
             }
         }
         return sb.toString();
+    }
+
+    public static byte[] encodeBinary(byte[] bytes) {
+        String prefix = "$" + bytes.length + "\r\n";
+        byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        baos.write(prefixBytes, 0, prefixBytes.length);
+        baos.write(bytes, 0, bytes.length);
+        return baos.toByteArray();
     }
 }
