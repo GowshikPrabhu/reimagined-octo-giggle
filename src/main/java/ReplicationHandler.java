@@ -66,7 +66,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
 
     @Override
     public void replicateCommand(List<String> commandParts) {
-        if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role"))) {
+        if ("master".equalsIgnoreCase(Configs.getReplicationInfoAsString("role"))) {
             String encodedCommand = RESPEncoder.encodeStringArray(commandParts);
             ByteBuffer buffer = ByteBuffer.wrap(encodedCommand.getBytes(StandardCharsets.UTF_8));
 
@@ -86,8 +86,8 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
 
     @Override
     public long getReplicationOffset() {
-        if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role"))) {
-            return Long.parseLong(Configs.getReplicationInfo("master_repl_offset"));
+        if ("master".equalsIgnoreCase(Configs.getReplicationInfoAsString("role"))) {
+            return (long) Configs.getReplicationInfo("master_repl_offset");
         } else {
             return bytesProcessedInReplication;
         }
@@ -104,7 +104,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
     }
 
     public SocketChannel initiateHandshake() throws IOException {
-        String role = Configs.getReplicationInfo("role");
+        String role = Configs.getReplicationInfoAsString("role");
         if (!"slave".equalsIgnoreCase(role)) {
             LoggingService.logInfo("Server is not configured as a slave. Skipping replication handshake.");
             return null;
@@ -372,7 +372,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
             } else {
                 commandExecutor.executeCommand(null, cmd, args,
                     (_) -> LoggingService.logFine("Slave: Suppressing string response for replicated cmd."),
-                    (_) -> LoggingService.logFine("Slave: Suppressing binary response for replicated cmd."));
+                    (_) -> LoggingService.logFine("Slave: Suppressing binary response for replicated cmd."), 0);
             }
             bytesProcessedInReplication += decoded.bytesProcessed;
         } else {

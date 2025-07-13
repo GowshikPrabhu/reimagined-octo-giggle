@@ -1,3 +1,4 @@
+import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
@@ -9,7 +10,7 @@ import java.nio.channels.SocketChannel; // New import
 public class CommandExecutor {
 
     public interface CommandHandler {
-        void handleCommand(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter);
+        void handleCommand(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed);
     }
 
     public interface ReplicationNotifier {
@@ -48,11 +49,11 @@ public class CommandExecutor {
         this.replicationNotifier = notifier;
     }
 
-    public void executeCommand(SocketChannel clientChannel, String command, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    public void executeCommand(SocketChannel clientChannel, String command, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         command = command.toLowerCase();
         CommandHandler handler = commandHandlers.get(command);
 
-        if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role"))) {
+        if ("master".equalsIgnoreCase(Configs.getReplicationInfoAsString("role"))) {
             if (command.equals("set") && replicationNotifier != null) {
                 List<String> fullCommand = new ArrayList<>();
                 fullCommand.add(command);
@@ -63,7 +64,7 @@ public class CommandExecutor {
         }
 
         if (handler != null) {
-            handler.handleCommand(clientChannel, args, stringWriter, byteWriter);
+            handler.handleCommand(clientChannel, args, stringWriter, byteWriter, bytesConsumed);
         } else {
             LoggingService.logError("Unknown command: " + command + " with args: " + args);
             stringWriter.accept(RESPEncoder.encodeError("ERR unknown command '" + command + "'"));
@@ -107,7 +108,7 @@ public class CommandExecutor {
         }
     }
 
-    private void handleCommandsRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handleCommandsRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         List<String> commands = List.of("command", "ping", "echo", "set", "get", "config", "keys", "info", "replconf", "psync", "wait");
         if (args.isEmpty()) {
             LoggingService.logFine("Sending command list COMMAND.");
@@ -133,13 +134,13 @@ public class CommandExecutor {
         }
     }
 
-    private void handlePing(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handlePing(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         String response = args.isEmpty() ? "PONG" : args.getFirst();
         LoggingService.logFine("Responding to PING with: " + response);
         stringWriter.accept(RESPEncoder.encodeSimpleString(response));
     }
 
-    private void handleEchoRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handleEchoRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         if (args.isEmpty()) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'echo' command"));
             return;
@@ -149,7 +150,7 @@ public class CommandExecutor {
         stringWriter.accept(RESPEncoder.encodeBulkString(arg));
     }
 
-    private void handleSetRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handleSetRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         if (args.size() < 2) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'set' command"));
             return;
@@ -186,9 +187,13 @@ public class CommandExecutor {
         cache.put(key, value, expiresMillis);
         LoggingService.logFine("Set key '" + key + "' with TTL: " + expiresMillis + "ms");
         stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
+        if ("master".equalsIgnoreCase(Configs.getReplicationInfoAsString("role"))) {
+            long offset = (long) Configs.getReplicationInfo("master_repl_offset");
+            Configs.setReplicationInfo("master_repl_offset", offset + bytesConsumed);
+        }
     }
 
-    private void handleGetRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handleGetRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         if (args.isEmpty()) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'get' command"));
             return;
@@ -198,7 +203,7 @@ public class CommandExecutor {
         stringWriter.accept(RESPEncoder.encodeBulkString(value));
     }
 
-    private void handleConfigRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handleConfigRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         if (args.size() < 2) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'config' command"));
             return;
@@ -222,7 +227,7 @@ public class CommandExecutor {
         }
     }
 
-    private void handleKeysRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handleKeysRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         if (args.isEmpty()) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'keys' command"));
             return;
@@ -240,7 +245,7 @@ public class CommandExecutor {
         stringWriter.accept(RESPEncoder.encodeStringArray(resultKeys));
     }
 
-    private void handleInfoRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handleInfoRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         if (args.isEmpty()) {
             stringWriter.accept(RESPEncoder.encodeError("ERR empty info command unimplemented"));
             return;
@@ -248,8 +253,8 @@ public class CommandExecutor {
         String arg = args.getFirst();
         if (arg.equalsIgnoreCase("replication")) {
             StringBuilder sb = new StringBuilder();
-            for (Map.Entry<String, String> entry : Configs.getReplicationInfo().entrySet()) {
-                sb.append(entry.getKey()).append(":").append(entry.getValue()).append("\n");
+            for (Map.Entry<String, Object> entry : Configs.getReplicationInfo().entrySet()) {
+                sb.append(entry.getKey()).append(":").append(entry.getValue().toString()).append("\n");
             }
             stringWriter.accept(RESPEncoder.encodeBulkString(sb.toString()));
         } else {
@@ -257,7 +262,7 @@ public class CommandExecutor {
         }
     }
 
-    private void handleReplConfRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handleReplConfRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         if (args.isEmpty()) {
             stringWriter.accept(RESPEncoder.encodeError("ERR empty replconf command unimplemented"));
             return;
@@ -270,7 +275,7 @@ public class CommandExecutor {
                     return;
                 }
                 LoggingService.logInfo("Got REPLCONF with listening-port: " + args.get(1));
-                if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role")) && replicationNotifier != null) {
+                if ("master".equalsIgnoreCase(Configs.getReplicationInfoAsString("role")) && replicationNotifier != null) {
                     replicationNotifier.registerSlaveChannel(clientChannel);
                 }
                 stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
@@ -288,7 +293,7 @@ public class CommandExecutor {
                     stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf GETACK' command"));
                     return;
                 }
-                if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role"))) {
+                if ("master".equalsIgnoreCase(Configs.getReplicationInfoAsString("role"))) {
                      LoggingService.logWarn("Master: Received REPLCONF GETACK from client " + clientChannel + ". This should not happen directly from a general client. Only internal WAIT uses it.");
                      stringWriter.accept(RESPEncoder.encodeError("ERR REPLCONF GETACK only for master-slave communication"));
                 } else {
@@ -303,7 +308,7 @@ public class CommandExecutor {
                 }
                 break;
             case "ack":
-                if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role")) && args.size() == 2) {
+                if ("master".equalsIgnoreCase(Configs.getReplicationInfoAsString("role")) && args.size() == 2) {
                     try {
                         long slaveOffset = Long.parseLong(args.get(1));
                         if (replicationNotifier != null) {
@@ -325,7 +330,7 @@ public class CommandExecutor {
         }
     }
 
-    private void handlePSyncRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+    private void handlePSyncRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         if (args.isEmpty() || args.size() < 2) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'psync' command"));
             return;
@@ -333,7 +338,7 @@ public class CommandExecutor {
         String replicationID = args.getFirst();
         String offset = args.get(1);
         LoggingService.logInfo("Got PSYNC with replicationID: " + replicationID + " and offset: " + offset);
-        stringWriter.accept(RESPEncoder.encodeSimpleString("FULLRESYNC " + Configs.getReplicationInfo("master_replid") + " 0"));
+        stringWriter.accept(RESPEncoder.encodeSimpleString("FULLRESYNC " + Configs.getReplicationInfoAsString("master_replid") + " 0"));
         String dummyHex = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
         byte[] bytes = HexFormat.of().parseHex(dummyHex);
         byte[] rdb = RESPEncoder.encodeBinary(bytes);
@@ -341,8 +346,9 @@ public class CommandExecutor {
         byteWriter.accept(rdb);
     }
 
-    private void handleWaitRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
-        if ("slave".equalsIgnoreCase(Configs.getReplicationInfo("role"))) {
+    private void handleWaitRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        LoggingService.logInfo("Start of wait: " + System.currentTimeMillis());
+        if ("slave".equalsIgnoreCase(Configs.getReplicationInfoAsString("role"))) {
             stringWriter.accept(RESPEncoder.encodeError("ERR WAIT command is only available when the server is a master."));
             return;
         }
@@ -375,6 +381,11 @@ public class CommandExecutor {
 
             if (acknowledgedSlavesCount >= requiredSlaves) {
                 LoggingService.logInfo("Master: WAIT condition met immediately. Slaves acknowledged: " + acknowledgedSlavesCount);
+                try {
+                    LoggingService.logInfo("Writing to write to channel: " + clientChannel.getRemoteAddress());
+                } catch (IOException e) {
+                    LoggingService.logError("Master: Error getting remote address for client channel: " + e.getMessage(), e);
+                }
                 stringWriter.accept(RESPEncoder.encodeInteger(acknowledgedSlavesCount));
                 return;
             }
@@ -391,6 +402,7 @@ public class CommandExecutor {
                     boolean completed = latch.await(timeoutMillis, TimeUnit.MILLISECONDS);
                     if (!completed) {
                         LoggingService.logInfo("Master: WAIT command timed out after " + timeoutMillis + "ms for client " + clientChannel);
+                        processPendingWaitRequests();
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();

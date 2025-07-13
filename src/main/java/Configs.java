@@ -10,7 +10,7 @@ public class Configs {
 
     private static final Map<String, String> config = new HashMap<>();
 
-    private static final Map<String, String> replicationInfo = new HashMap<>();
+    private static final Map<String, Object> replicationInfo = new HashMap<>();
 
     public static String getConfiguration(String key) {
         return config.get(key);
@@ -20,15 +20,19 @@ public class Configs {
         config.put(key, value);
     }
 
-    public static String getReplicationInfo(String key) {
+    public static Object getReplicationInfo(String key) {
         return replicationInfo.get(key);
     }
 
-    public static void setReplicationInfo(String key, String value) {
+    public static String getReplicationInfoAsString(String key) {
+        return (String) replicationInfo.get(key);
+    }
+
+    public static void setReplicationInfo(String key, Object value) {
         replicationInfo.put(key, value);
     }
 
-    public static Map<String, String> getReplicationInfo() {
+    public static Map<String, Object> getReplicationInfo() {
         return replicationInfo;
     }
 }

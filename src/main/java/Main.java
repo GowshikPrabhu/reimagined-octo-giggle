@@ -112,7 +112,7 @@ public class Main {
         if (!argsMap.containsKey("replicaof")) {
             Configs.setReplicationInfo("role", "master");
             Configs.setReplicationInfo("master_replid", "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb");
-            Configs.setReplicationInfo("master_repl_offset", String.valueOf(0));
+            Configs.setReplicationInfo("master_repl_offset", 0L);
         }
     }
 }

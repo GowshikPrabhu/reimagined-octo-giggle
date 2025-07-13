@@ -32,7 +32,6 @@ public class EventLoop implements AutoCloseable {
     private SocketChannel masterChannel = null;
     private ByteBuffer masterReadBuffer = null;
     private final Queue<ByteBuffer> masterWriteQueue = new LinkedList<>();
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
 
     public EventLoop(int port) throws IOException {
@@ -50,18 +49,10 @@ public class EventLoop implements AutoCloseable {
         serverSocketChannel.configureBlocking(false);
         LoggingService.logInfo("Server listening on port " + port);
         serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
-
-        scheduler.scheduleAtFixedRate(() -> {
-            try {
-                commandExecutor.processPendingWaitRequests();
-            } catch (Exception e) {
-                LoggingService.logError("Error in scheduled WAIT request processing: " + e.getMessage(), e);
-            }
-        }, 0, 100, TimeUnit.MILLISECONDS);
     }
 
     public void start() throws IOException {
-        String role = Configs.getReplicationInfo("role");
+        String role = Configs.getReplicationInfoAsString("role");
         if ("slave".equalsIgnoreCase(role)) {
             try {
                 masterChannel = replicationHandler.initiateHandshake();
@@ -176,6 +167,7 @@ public class EventLoop implements AutoCloseable {
 
         int bytesRead;
         try {
+            LoggingService.logInfo("Reading from client channel: " + clientChannel.getRemoteAddress());
             bytesRead = clientChannel.read(readBuffer);
         } catch (IOException e) {
             LoggingService.logError("Error reading from client channel: " + e.getMessage(), e);
@@ -194,12 +186,14 @@ public class EventLoop implements AutoCloseable {
 
         try {
             while (readBuffer.hasRemaining() && commandsProcessed++ < Configs.MAX_COMMANDS_PER_READ) {
+                int startingPosition = readBuffer.position();
                 List<String> cmdAndArgs = commandParser.parseNextCommand(readBuffer);
 
                 if (cmdAndArgs == null) {
                     readBuffer.compact();
                     return;
                 }
+                int bytesConsumed = readBuffer.position() - startingPosition;
 
                 String cmd = cmdAndArgs.getFirst();
                 List<String> args = cmdAndArgs.subList(1, cmdAndArgs.size());
@@ -210,7 +204,7 @@ public class EventLoop implements AutoCloseable {
                 Consumer<String> stringWriter = (String s) -> queueWrite(clientChannel, s);
                 Consumer<byte[]> byteWriter = (byte[] b) -> queueWrite(clientChannel, b);
 
-                commandExecutor.executeCommand(clientChannel, cmd, args, stringWriter, byteWriter);
+                commandExecutor.executeCommand(clientChannel, cmd, args, stringWriter, byteWriter, bytesConsumed);
             }
         } catch (IOException e) {
             LoggingService.logError("Protocol parsing error: " + e.getMessage(), e);
