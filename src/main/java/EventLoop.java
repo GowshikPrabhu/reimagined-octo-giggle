@@ -13,6 +13,9 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 public class EventLoop implements AutoCloseable {
@@ -29,6 +32,7 @@ public class EventLoop implements AutoCloseable {
     private SocketChannel masterChannel = null;
     private ByteBuffer masterReadBuffer = null;
     private final Queue<ByteBuffer> masterWriteQueue = new LinkedList<>();
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
 
     public EventLoop(int port) throws IOException {
@@ -46,6 +50,14 @@ public class EventLoop implements AutoCloseable {
         serverSocketChannel.configureBlocking(false);
         LoggingService.logInfo("Server listening on port " + port);
         serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
+
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                commandExecutor.processPendingWaitRequests();
+            } catch (Exception e) {
+                LoggingService.logError("Error in scheduled WAIT request processing: " + e.getMessage(), e);
+            }
+        }, 0, 100, TimeUnit.MILLISECONDS);
     }
 
     public void start() throws IOException {

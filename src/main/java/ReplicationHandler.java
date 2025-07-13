@@ -7,6 +7,7 @@ import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -28,7 +29,9 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
     private final Set<SocketChannel> connectedSlaves = Collections.synchronizedSet(new HashSet<>());
 
     private final Queue<RESPDecoder.DecodedResult> bufferedReplicationCommands = new LinkedList<>();
-    private int bytesProcessedInReplication = 0;
+    private long bytesProcessedInReplication = 0;
+
+    private final Map<SocketChannel, Long> slaveAckOffsets = new ConcurrentHashMap<>();
 
     public ReplicationHandler(int port, Selector selector,
                               Consumer<ByteBuffer> queueWriteToMasterCallback,
@@ -48,6 +51,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
     @Override
     public void registerSlaveChannel(SocketChannel slaveChannel) {
         connectedSlaves.add(slaveChannel);
+        slaveAckOffsets.put(slaveChannel, 0L);
         LoggingService.logInfo("Registered new slave: " + slaveChannel);
     }
 
@@ -55,6 +59,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
     public void removeConnectedSlave(SocketChannel slaveChannel) {
         if (connectedSlaves.contains(slaveChannel)) {
             connectedSlaves.remove(slaveChannel);
+            slaveAckOffsets.remove(slaveChannel);
             LoggingService.logInfo("Removed slave from replication: " + slaveChannel);
         }
     }
@@ -80,8 +85,22 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
     }
 
     @Override
-    public int getReplicationOffset() {
-        return bytesProcessedInReplication;
+    public long getReplicationOffset() {
+        if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role"))) {
+            return Long.parseLong(Configs.getReplicationInfo("master_repl_offset"));
+        } else {
+            return bytesProcessedInReplication;
+        }
+    }
+
+    @Override
+    public Map<SocketChannel, Long> getSlaveAckOffsets() {
+        return slaveAckOffsets;
+    }
+
+    @Override
+    public Set<SocketChannel> getConnectedSlaves() {
+        return Collections.unmodifiableSet(connectedSlaves);
     }
 
     public SocketChannel initiateHandshake() throws IOException {
@@ -195,13 +214,13 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
                         @SuppressWarnings("unchecked")
                         List<String> cmdAndArgs = (List<String>) decodedMessage;
 
-                        if (!isHandshakeResponse(decodedMessage)) {
+                        if (isHandshakeResponse(decodedMessage)) {
+                            handleHandshakeCommandResponse(cmdAndArgs);
+                        } else {
                             LoggingService.logInfo(String.format("Slave: Buffering command '%s' (received during handshake/RDB phase).", cmdAndArgs.getFirst()));
                             bufferedReplicationCommands.add(decoded);
                         }
-                    }
-
-                    if (decodedMessage instanceof String rawResponse) {
+                    } else if (decodedMessage instanceof String rawResponse) {
                         LoggingService.logInfo("Received raw response from master (" + state + "): " + rawResponse.trim());
 
                         switch (state) {
@@ -263,7 +282,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
                                 LoggingService.logWarn("Received unexpected simple string from master in state: " + state + ": " + rawResponse);
                                 break;
                         }
-                    } else if (!(decodedMessage instanceof List)) {
+                    } else {
                         LoggingService.logError("Slave: Expected simple string or command array during handshake, but received: " + decodedMessage.getClass().getSimpleName() + " (" + decodedMessage + ")");
                         throw new IOException("Protocol error: Unexpected message type during handshake.");
                     }
@@ -287,25 +306,28 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
         }
     }
 
+    private void handleHandshakeCommandResponse(List<String> cmdAndArgs) throws IOException {
+        String cmd = cmdAndArgs.getFirst().toLowerCase();
+        List<String> args = cmdAndArgs.subList(1, cmdAndArgs.size());
+
+        if (cmd.equals("replconf") && !args.isEmpty()) {
+            if (args.get(0).equalsIgnoreCase("ack") && args.size() == 2) {
+                try {
+                    long ackOffset = Long.parseLong(args.get(1));
+                    LoggingService.logWarn("Slave received unexpected REPLCONF ACK from master during handshake: " + cmdAndArgs);
+                } catch (NumberFormatException e) {
+                    LoggingService.logError("Invalid ACK offset in REPLCONF ACK from master: " + cmdAndArgs, e);
+                }
+            }
+        } else {
+            LoggingService.logWarn("Received unexpected command array from master during handshake: " + cmdAndArgs);
+        }
+    }
+
     private void processBufferedAndRemainingCommands(ByteBuffer buffer) throws IOException {
         while (!bufferedReplicationCommands.isEmpty()) {
             RESPDecoder.DecodedResult decoded = bufferedReplicationCommands.poll();
-            @SuppressWarnings("unchecked")
-            List<String> cmdAndArgs = (List<String>) decoded.value;
-            LoggingService.logInfo(String.format("Slave: Applying buffered command '%s'.", cmdAndArgs.getFirst()));
-            String cmd = cmdAndArgs.getFirst().toLowerCase();
-            List<String> args = cmdAndArgs.subList(1, cmdAndArgs.size());
-            if (cmd.equals("replconf") && !args.isEmpty() && args.getFirst().equalsIgnoreCase("getack")) {
-                commandExecutor.executeCommand(null, cmd, args,
-                        (resp) -> queueWriteToMasterCallback.accept(ByteBuffer.wrap(resp.getBytes(StandardCharsets.UTF_8))),
-                        (_) -> {}
-                );
-            } else {
-                commandExecutor.executeCommand(null, cmd, args,
-                        (_) -> LoggingService.logInfo("Slave: Suppressing string response for replicated cmd."),
-                        (_) -> LoggingService.logInfo("Slave: Suppressing binary response for replicated cmd."));
-            }
-            bytesProcessedInReplication += decoded.bytesProcessed;
+            processReplicatedMessage(decoded);
         }
         LoggingService.logInfo("All buffered commands applied. Replication handshake completed successfully!");
 
@@ -337,14 +359,20 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
             LoggingService.logInfo(String.format("Slave: Processing replicated command '%s', args: %s", cmd, args));
 
             if (cmd.equals("replconf") && !args.isEmpty() && args.getFirst().equalsIgnoreCase("getack")) {
-                commandExecutor.executeCommand(null, cmd, args,
-                    (resp) -> queueWriteToMasterCallback.accept(ByteBuffer.wrap(resp.getBytes(StandardCharsets.UTF_8))),
-                    (_) -> {}
-                );
+                String ackResponse = RESPEncoder.encodeStringArray(List.of("REPLCONF", "ACK", String.valueOf(bytesProcessedInReplication)));
+                queueWriteToMasterCallback.accept(ByteBuffer.wrap(ackResponse.getBytes(StandardCharsets.UTF_8)));
+                LoggingService.logInfo("Slave: Responded to REPLCONF GETACK with offset: " + bytesProcessedInReplication);
+            } else if (cmd.equals("replconf") && !args.isEmpty() && args.getFirst().equalsIgnoreCase("ack") && args.size() == 2) {
+                 try {
+                    long ackOffset = Long.parseLong(args.get(1));
+                    LoggingService.logWarn("Slave: Received REPLCONF ACK from master (unexpected for slave role): offset " + ackOffset);
+                } catch (NumberFormatException e) {
+                    LoggingService.logError("Invalid ACK offset in REPLCONF ACK from master: " + cmdAndArgs, e);
+                }
             } else {
                 commandExecutor.executeCommand(null, cmd, args,
-                    (_) -> LoggingService.logInfo("Slave: Suppressing string response for replicated cmd."),
-                    (_) -> LoggingService.logInfo("Slave: Suppressing binary response for replicated cmd."));
+                    (_) -> LoggingService.logFine("Slave: Suppressing string response for replicated cmd."),
+                    (_) -> LoggingService.logFine("Slave: Suppressing binary response for replicated cmd."));
             }
             bytesProcessedInReplication += decoded.bytesProcessed;
         } else {
@@ -474,6 +502,14 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
     private boolean isHandshakeResponse(Object decodedMessage) {
         if (decodedMessage instanceof String s) {
             return s.equals("PONG") || s.equals("OK") || s.startsWith("FULLRESYNC");
+        }
+        if (decodedMessage instanceof List) {
+            @SuppressWarnings("unchecked")
+            List<String> cmdAndArgs = (List<String>) decodedMessage;
+            if (cmdAndArgs.size() >= 2 && "replconf".equalsIgnoreCase(cmdAndArgs.get(0))) {
+                String subCmd = cmdAndArgs.get(1).toLowerCase();
+                return subCmd.equals("ack");
+            }
         }
         return false;
     }

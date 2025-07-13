@@ -1,12 +1,9 @@
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
-import java.util.HexFormat;
 import java.nio.channels.SocketChannel; // New import
 
 public class CommandExecutor {
@@ -19,12 +16,17 @@ public class CommandExecutor {
         void replicateCommand(List<String> commandParts);
         void registerSlaveChannel(SocketChannel slaveChannel);
         void removeConnectedSlave(SocketChannel slaveChannel);
-        int getReplicationOffset();
+        long getReplicationOffset();
+        Map<SocketChannel, Long> getSlaveAckOffsets();
+        Set<SocketChannel> getConnectedSlaves();
     }
 
     private final Cache cache;
     private final Map<String, CommandHandler> commandHandlers = new HashMap<>();
     private ReplicationNotifier replicationNotifier;
+
+    private final ConcurrentLinkedQueue<PendingWaitRequest> pendingWaitRequests = new ConcurrentLinkedQueue<>();
+
 
     public CommandExecutor() {
         this.cache = Cache.getInstance();
@@ -68,8 +70,45 @@ public class CommandExecutor {
         }
     }
 
+    public void processPendingWaitRequests() {
+        if (replicationNotifier == null) {
+            LoggingService.logWarn("Cannot process pending WAIT requests: ReplicationNotifier not set.");
+            return;
+        }
+
+        Iterator<PendingWaitRequest> iterator = pendingWaitRequests.iterator();
+
+        while (iterator.hasNext()) {
+            PendingWaitRequest pending = iterator.next();
+
+            long acknowledgedSlaves = replicationNotifier.getSlaveAckOffsets().values().stream()
+                .filter(offset -> offset >= pending.masterOffset)
+                .count();
+
+            if (acknowledgedSlaves >= pending.requiredSlaves) {
+                LoggingService.logInfo("Master: WAIT condition met for client " + pending.clientChannel + ". Slaves acknowledged: " + acknowledgedSlaves);
+                try {
+                    pending.stringWriter.accept(RESPEncoder.encodeInteger(acknowledgedSlaves));
+                } catch (Exception e) {
+                    LoggingService.logError("Error writing WAIT response to client " + pending.clientChannel + ": " + e.getMessage(), e);
+                }
+                pending.latch.countDown();
+                iterator.remove();
+            } else if (pending.timeoutMillis > 0 && (System.currentTimeMillis() - pending.startTime >= pending.timeoutMillis)) {
+                LoggingService.logInfo("Master: Pending WAIT command timed out for client " + pending.clientChannel + ". Slaves acknowledged: " + acknowledgedSlaves);
+                try {
+                    pending.stringWriter.accept(RESPEncoder.encodeInteger(acknowledgedSlaves));
+                } catch (Exception e) {
+                    LoggingService.logError("Error writing WAIT timeout response to client " + pending.clientChannel + ": " + e.getMessage(), e);
+                }
+                pending.latch.countDown();
+                iterator.remove();
+            }
+        }
+    }
+
     private void handleCommandsRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
-        List<String> commands = List.of("command", "ping", "echo", "set", "get", "config", "keys", "info", "replconf", "psync");
+        List<String> commands = List.of("command", "ping", "echo", "set", "get", "config", "keys", "info", "replconf", "psync", "wait");
         if (args.isEmpty()) {
             LoggingService.logFine("Sending command list COMMAND.");
             stringWriter.accept(RESPEncoder.encodeStringArray(commands));
@@ -223,39 +262,66 @@ public class CommandExecutor {
             stringWriter.accept(RESPEncoder.encodeError("ERR empty replconf command unimplemented"));
             return;
         }
-        String arg = args.getFirst();
-        if (arg.equalsIgnoreCase("listening-port")) {
-            if (args.size() < 2) {
-                stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf listening-port' command"));
-                return;
-            }
-            arg = args.get(1);
-            LoggingService.logInfo("Got REPLCONF with listening-port: " + arg);
-            if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role")) && replicationNotifier != null) {
-                replicationNotifier.registerSlaveChannel(clientChannel);
-            }
-            stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
-        } else if (arg.equalsIgnoreCase("capa")) {
-            if (args.size() < 2) {
-                stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf capa' command"));
-                return;
-            }
-            arg = args.get(1);
-            LoggingService.logInfo("Got REPLCONF with capa: " + arg);
-            stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
-        } else if (arg.equalsIgnoreCase("GETACK")) {
-            if (args.size() < 2) {
-                stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf GETACK' command"));
-                return;
-            }
-            arg = args.get(1);
-            LoggingService.logInfo("Got REPLCONF with GETACK: " + arg);
-            int replicationOffset = replicationNotifier.getReplicationOffset();
-            String s = RESPEncoder.encodeStringArray(List.of("REPLCONF", "ACK", replicationOffset));
-            LoggingService.logInfo("Sending REPLCONF ACK: " + s);
-            stringWriter.accept(s);
-        } else {
-            stringWriter.accept(RESPEncoder.encodeError("ERR unknown replconf subcommand '" + arg + "'"));
+        String subCommand = args.getFirst().toLowerCase();
+        switch (subCommand) {
+            case "listening-port":
+                if (args.size() < 2) {
+                    stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf listening-port' command"));
+                    return;
+                }
+                LoggingService.logInfo("Got REPLCONF with listening-port: " + args.get(1));
+                if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role")) && replicationNotifier != null) {
+                    replicationNotifier.registerSlaveChannel(clientChannel);
+                }
+                stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
+                break;
+            case "capa":
+                if (args.size() < 2) {
+                    stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf capa' command"));
+                    return;
+                }
+                LoggingService.logInfo("Got REPLCONF with capa: " + args.get(1));
+                stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
+                break;
+            case "getack":
+                if (args.size() < 1) {
+                    stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf GETACK' command"));
+                    return;
+                }
+                if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role"))) {
+                     LoggingService.logWarn("Master: Received REPLCONF GETACK from client " + clientChannel + ". This should not happen directly from a general client. Only internal WAIT uses it.");
+                     stringWriter.accept(RESPEncoder.encodeError("ERR REPLCONF GETACK only for master-slave communication"));
+                } else {
+                    if (replicationNotifier == null) {
+                         stringWriter.accept(RESPEncoder.encodeError("ERR ReplicationNotifier not initialized for ACK"));
+                         return;
+                    }
+                    long replicationOffset = replicationNotifier.getReplicationOffset();
+                    String s = RESPEncoder.encodeStringArray(List.of("REPLCONF", "ACK", String.valueOf(replicationOffset)));
+                    LoggingService.logInfo("Slave: Sending REPLCONF ACK: " + s + " with offset: " + replicationOffset);
+                    stringWriter.accept(s);
+                }
+                break;
+            case "ack":
+                if ("master".equalsIgnoreCase(Configs.getReplicationInfo("role")) && args.size() == 2) {
+                    try {
+                        long slaveOffset = Long.parseLong(args.get(1));
+                        if (replicationNotifier != null) {
+                            replicationNotifier.getSlaveAckOffsets().put(clientChannel, slaveOffset);
+                        }
+                        LoggingService.logInfo("Master: Received REPLCONF ACK from slave " + clientChannel + " with offset: " + slaveOffset);
+                        processPendingWaitRequests();
+                    } catch (NumberFormatException e) {
+                        LoggingService.logError("Master: Invalid ACK offset from slave " + clientChannel + ": " + args.get(1), e);
+                        stringWriter.accept(RESPEncoder.encodeError("ERR invalid ACK offset"));
+                    }
+                } else {
+                    stringWriter.accept(RESPEncoder.encodeError("ERR invalid replconf ack command"));
+                }
+                break;
+            default:
+                stringWriter.accept(RESPEncoder.encodeError("ERR unknown replconf subcommand '" + subCommand + "'"));
+                break;
         }
     }
 
@@ -276,17 +342,102 @@ public class CommandExecutor {
     }
 
     private void handleWaitRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+        if ("slave".equalsIgnoreCase(Configs.getReplicationInfo("role"))) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR WAIT command is only available when the server is a master."));
+            return;
+        }
         if (args.size() < 2) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'wait' command"));
             return;
         }
+        if (replicationNotifier == null) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR ReplicationNotifier not initialized. Cannot handle WAIT."));
+            return;
+        }
+
         try {
-            int numSlaves = Integer.parseInt(args.get(0));
-            int timeoutMillis = Integer.parseInt(args.get(1));
-            LoggingService.logInfo("Received WAIT command with numSlaves: " + numSlaves + " and timeout: " + timeoutMillis);
-            stringWriter.accept(RESPEncoder.encodeInteger(numSlaves));
+            int requiredSlaves = Integer.parseInt(args.get(0));
+            long timeoutMillis = Long.parseLong(args.get(1));
+            LoggingService.logInfo("Master: Received WAIT command. Required Slaves: " + requiredSlaves + ", Timeout: " + timeoutMillis + "ms");
+
+            long currentMasterOffset = replicationNotifier.getReplicationOffset();
+            LoggingService.logInfo("Master: Current replication offset: " + currentMasterOffset);
+
+            if (replicationNotifier.getConnectedSlaves().isEmpty()) {
+                LoggingService.logInfo("Master: No slaves connected. Responding with 0 for WAIT command.");
+                stringWriter.accept(RESPEncoder.encodeInteger(0));
+                return;
+            }
+
+            long acknowledgedSlavesCount = replicationNotifier.getSlaveAckOffsets().values().stream()
+                .filter(offset -> offset >= currentMasterOffset)
+                .count();
+
+            if (acknowledgedSlavesCount >= requiredSlaves) {
+                LoggingService.logInfo("Master: WAIT condition met immediately. Slaves acknowledged: " + acknowledgedSlavesCount);
+                stringWriter.accept(RESPEncoder.encodeInteger(acknowledgedSlavesCount));
+                return;
+            }
+
+            CountDownLatch latch = new CountDownLatch(1);
+            PendingWaitRequest pending = new PendingWaitRequest(clientChannel, stringWriter, requiredSlaves, currentMasterOffset, timeoutMillis, latch);
+            pendingWaitRequests.offer(pending);
+
+            replicationNotifier.replicateCommand(List.of("REPLCONF", "GETACK", "*"));
+            LoggingService.logInfo("Master: Sent REPLCONF GETACK * to all slaves for WAIT command.");
+
+            Thread waitThread = new Thread(() -> {
+                try {
+                    boolean completed = latch.await(timeoutMillis, TimeUnit.MILLISECONDS);
+                    if (!completed) {
+                        LoggingService.logInfo("Master: WAIT command timed out after " + timeoutMillis + "ms for client " + clientChannel);
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    LoggingService.logError("Master: WAIT command interrupted for client " + clientChannel + ": " + e.getMessage(), e);
+                    stringWriter.accept(RESPEncoder.encodeError("ERR WAIT command interrupted"));
+                    pendingWaitRequests.remove(pending);
+                }
+            });
+            waitThread.setName("RedisWaitClient-" + clientChannel.socket().getPort());
+            waitThread.start();
+
         } catch (NumberFormatException e) {
             stringWriter.accept(RESPEncoder.encodeError("ERR invalid number format in 'wait' command"));
+        }
+    }
+
+    private static class PendingWaitRequest {
+        final SocketChannel clientChannel;
+        final Consumer<String> stringWriter;
+        final int requiredSlaves;
+        final long masterOffset;
+        final long timeoutMillis;
+        final long startTime;
+        final CountDownLatch latch;
+
+        PendingWaitRequest(SocketChannel clientChannel, Consumer<String> stringWriter, int requiredSlaves, long masterOffset, long timeoutMillis, CountDownLatch latch) {
+            this.clientChannel = clientChannel;
+            this.stringWriter = stringWriter;
+            this.requiredSlaves = requiredSlaves;
+            this.masterOffset = masterOffset;
+            this.timeoutMillis = timeoutMillis;
+            this.startTime = System.currentTimeMillis();
+            this.latch = latch;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            PendingWaitRequest that = (PendingWaitRequest) o;
+            return clientChannel.equals(that.clientChannel) &&
+                   masterOffset == that.masterOffset;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(clientChannel, masterOffset);
         }
     }
 }
