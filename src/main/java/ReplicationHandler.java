@@ -276,9 +276,16 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
             LoggingService.logInfo(String.format("Slave: Applying buffered command '%s'.", cmdAndArgs.getFirst()));
             String cmd = cmdAndArgs.getFirst().toLowerCase();
             List<String> args = cmdAndArgs.subList(1, cmdAndArgs.size());
-            commandExecutor.executeCommand(null, cmd, args,
-                    (_) -> LoggingService.logInfo("Slave: Suppressing string response for buffered replicated cmd."),
-                    (_) -> LoggingService.logInfo("Slave: Suppressing binary response for buffered replicated cmd."));
+            if (cmd.equals("replconf") && !args.isEmpty() && args.getFirst().equalsIgnoreCase("getack")) {
+                commandExecutor.executeCommand(null, cmd, args,
+                        (resp) -> queueWriteToMasterCallback.accept(ByteBuffer.wrap(resp.getBytes(StandardCharsets.UTF_8))),
+                        (_) -> {}
+                );
+            } else {
+                commandExecutor.executeCommand(null, cmd, args,
+                        (_) -> LoggingService.logInfo("Slave: Suppressing string response for replicated cmd."),
+                        (_) -> LoggingService.logInfo("Slave: Suppressing binary response for replicated cmd."));
+            }
             bytesProcessedInReplication += decoded.bytesProcessed;
         }
         LoggingService.logInfo("All buffered commands applied. Replication handshake completed successfully!");
