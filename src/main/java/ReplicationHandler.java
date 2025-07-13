@@ -236,6 +236,25 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
                                 if (rawResponse.startsWith("FULLRESYNC")) {
                                     LoggingService.logInfo("Received FULLRESYNC from master. Now awaiting RDB bulk string header.");
                                     state = ReplicationState.AWAITING_RDB_BULK_STRING_HEADER;
+                                    if (buffer.hasRemaining()) {
+                                        if ((char) buffer.get(buffer.position()) == '$') {
+                                            String bulkStringHeader = readLine(buffer);
+                                            if (bulkStringHeader != null) {
+                                                try {
+                                                    rdbBytesToRead = Integer.parseInt(bulkStringHeader.substring(1, bulkStringHeader.length() - 2));
+                                                    LoggingService.logInfo("Received RDB bulk string header. RDB size: " + rdbBytesToRead + " bytes.");
+                                                    state = ReplicationState.READING_RDB_BINARY;
+                                                    handleRdbBinaryRead(buffer);
+                                                    if (state == ReplicationState.READY_FOR_REPLICATION) {
+                                                        processBufferedAndRemainingCommands(buffer);
+                                                    }
+                                                    return;
+                                                } catch (NumberFormatException | IndexOutOfBoundsException e) {
+                                                    throw new IOException("Malformed RDB bulk string length: '" + bulkStringHeader.trim() + "'", e);
+                                                }
+                                            }
+                                        }
+                                    }
                                 } else {
                                     throw new IOException("Unexpected response to PSYNC: " + rawResponse);
                                 }

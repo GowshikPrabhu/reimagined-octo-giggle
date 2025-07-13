@@ -39,6 +39,7 @@ public class CommandExecutor {
         commandHandlers.put("info", this::handleInfoRequest);
         commandHandlers.put("replconf", this::handleReplConfRequest);
         commandHandlers.put("psync", this::handlePSyncRequest);
+        commandHandlers.put("wait", this::handleWaitRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -272,5 +273,20 @@ public class CommandExecutor {
         byte[] rdb = RESPEncoder.encodeBinary(bytes);
         LoggingService.logInfo("Sending dummy RDB. Size: " + rdb.length);
         byteWriter.accept(rdb);
+    }
+
+    private void handleWaitRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter) {
+        if (args.size() < 2) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'wait' command"));
+            return;
+        }
+        try {
+            int numSlaves = Integer.parseInt(args.get(0));
+            int timeoutMillis = Integer.parseInt(args.get(1));
+            LoggingService.logInfo("Received WAIT command with numSlaves: " + numSlaves + " and timeout: " + timeoutMillis);
+            stringWriter.accept(RESPEncoder.encodeInteger(numSlaves));
+        } catch (NumberFormatException e) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR invalid number format in 'wait' command"));
+        }
     }
 }
