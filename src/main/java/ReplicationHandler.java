@@ -27,6 +27,8 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
     private final ByteArrayOutputStream receivedRdbData = new ByteArrayOutputStream();
     private final Set<SocketChannel> connectedSlaves = Collections.synchronizedSet(new HashSet<>());
 
+    private final Queue<List<String>> bufferedReplicationCommands = new LinkedList<>();
+
     public ReplicationHandler(int port, Selector selector,
                               Consumer<ByteBuffer> queueWriteToMasterCallback,
                               Supplier<ByteBuffer> getMasterReadBufferCallback,
@@ -144,14 +146,14 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
         try {
             if (state == ReplicationState.READING_RDB_BINARY) {
                 handleRdbBinaryRead(buffer);
+                if (state == ReplicationState.READY_FOR_REPLICATION) {
+                    processBufferedAndRemainingCommands(buffer);
+                }
                 return;
             }
 
             if (state == ReplicationState.AWAITING_RDB_BULK_STRING_HEADER) {
-                if (!buffer.hasRemaining()) {
-                    return;
-                }
-                if ((char) buffer.get(buffer.position()) == '$') {
+                if (buffer.hasRemaining() && (char) buffer.get(buffer.position()) == '$') {
                     String bulkStringHeader = readLine(buffer);
                     if (bulkStringHeader == null) {
                         return;
@@ -161,13 +163,13 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
                         LoggingService.logInfo("Received RDB bulk string header. RDB size: " + rdbBytesToRead + " bytes.");
                         state = ReplicationState.READING_RDB_BINARY;
                         handleRdbBinaryRead(buffer);
+                        if (state == ReplicationState.READY_FOR_REPLICATION) {
+                            processBufferedAndRemainingCommands(buffer);
+                        }
                         return;
                     } catch (NumberFormatException | IndexOutOfBoundsException e) {
-                        throw new IOException("Malformed RDB bulk string length header: '" + bulkStringHeader.trim() + "'", e);
+                        throw new IOException("Malformed RDB bulk string length: '" + bulkStringHeader.trim() + "'", e);
                     }
-                } else {
-                    LoggingService.logError("Expected RDB bulk string header '$', but received different type: " + (char) buffer.get(buffer.position()), null);
-                    throw new IOException("Protocol error: Expected RDB bulk string header after +FULLRESYNC.");
                 }
             }
 
@@ -180,32 +182,17 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
                     break;
                 }
 
-                if (state == ReplicationState.READY_FOR_REPLICATION || state == ReplicationState.RECEIVED_RDB) {
+                if (state != ReplicationState.READY_FOR_REPLICATION) {
                     if (decodedMessage instanceof List) {
                         @SuppressWarnings("unchecked")
                         List<String> cmdAndArgs = (List<String>) decodedMessage;
-                        if (cmdAndArgs.isEmpty()) {
-                            LoggingService.logWarn("Slave: Received empty command array from master.");
-                            continue;
+
+                        if (!isHandshakeResponse(decodedMessage)) {
+                            LoggingService.logInfo(String.format("Slave: Buffering command '%s' (received during handshake/RDB phase).", cmdAndArgs.getFirst()));
+                            bufferedReplicationCommands.add(cmdAndArgs);
                         }
-
-                        String cmd = cmdAndArgs.getFirst().toLowerCase();
-                        List<String> args = cmdAndArgs.subList(1, cmdAndArgs.size());
-
-                        LoggingService.logInfo(String.format("Slave: Processing replicated command '%s', args: %s", cmd, args));
-
-                        commandExecutor.executeCommand(null, cmd, args,
-                                (_) -> LoggingService.logFine("Slave: Suppressing string response for replicated cmd."),
-                                (_) -> LoggingService.logFine("Slave: Suppressing binary response for replicated cmd."));
-
-                        if (state == ReplicationState.RECEIVED_RDB) {
-                            state = ReplicationState.READY_FOR_REPLICATION;
-                        }
-                    } else {
-                        LoggingService.logError("Slave: Expected command array, but received: " + decodedMessage.getClass().getSimpleName() + " (" + decodedMessage + ")");
-                        throw new IOException("Protocol error: Expected array command during replication.");
                     }
-                } else {
+
                     if (decodedMessage instanceof String rawResponse) {
                         LoggingService.logInfo("Received raw response from master (" + state + "): " + rawResponse.trim());
 
@@ -249,10 +236,12 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
                                 LoggingService.logWarn("Received unexpected simple string from master in state: " + state + ": " + rawResponse);
                                 break;
                         }
-                    } else {
-                        LoggingService.logError("Slave: Expected simple string or bulk string during handshake, but received: " + decodedMessage.getClass().getSimpleName() + " (" + decodedMessage + ")");
+                    } else if (!(decodedMessage instanceof List)) {
+                        LoggingService.logError("Slave: Expected simple string or command array during handshake, but received: " + decodedMessage.getClass().getSimpleName() + " (" + decodedMessage + ")");
                         throw new IOException("Protocol error: Unexpected message type during handshake.");
                     }
+                } else {
+                    processReplicatedMessage(decodedMessage);
                 }
             }
         } catch (IOException e) {
@@ -270,6 +259,55 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
             }
         }
     }
+
+    private void processBufferedAndRemainingCommands(ByteBuffer buffer) throws IOException {
+        while (!bufferedReplicationCommands.isEmpty()) {
+            List<String> cmdAndArgs = bufferedReplicationCommands.poll();
+            LoggingService.logInfo(String.format("Slave: Applying buffered command '%s'.", cmdAndArgs.getFirst()));
+            String cmd = cmdAndArgs.getFirst().toLowerCase();
+            List<String> args = cmdAndArgs.subList(1, cmdAndArgs.size());
+            commandExecutor.executeCommand(null, cmd, args,
+                    (_) -> LoggingService.logFine("Slave: Suppressing string response for buffered replicated cmd."),
+                    (_) -> LoggingService.logFine("Slave: Suppressing binary response for buffered replicated cmd."));
+        }
+        LoggingService.logInfo("All buffered commands applied. Replication handshake completed successfully!");
+
+        while (buffer.hasRemaining()) {
+            buffer.mark();
+            Object decodedMessage = RESPDecoder.decode(buffer);
+            if (decodedMessage != null) {
+                processReplicatedMessage(decodedMessage);
+            } else {
+                buffer.reset();
+                break;
+            }
+        }
+    }
+
+    private void processReplicatedMessage(Object decodedMessage) throws IOException {
+        if (decodedMessage instanceof List) {
+            @SuppressWarnings("unchecked")
+            List<String> cmdAndArgs = (List<String>) decodedMessage;
+            if (cmdAndArgs.isEmpty()) {
+                LoggingService.logWarn("Slave: Received empty command array from master.");
+                return;
+            }
+
+            String cmd = cmdAndArgs.getFirst().toLowerCase();
+            List<String> args = cmdAndArgs.subList(1, cmdAndArgs.size());
+
+            LoggingService.logInfo(String.format("Slave: Processing replicated command '%s', args: %s", cmd, args));
+
+            commandExecutor.executeCommand(null, cmd, args,
+                    (_) -> LoggingService.logFine("Slave: Suppressing string response for replicated cmd."),
+                    (_) -> LoggingService.logFine("Slave: Suppressing binary response for replicated cmd."));
+
+        } else {
+            LoggingService.logError("Slave: Expected command array for replication, but received: " + decodedMessage.getClass().getSimpleName() + " (" + decodedMessage + ")");
+            throw new IOException("Protocol error: Expected array command during replication.");
+        }
+    }
+
 
     private void handleRdbBinaryRead(ByteBuffer buffer) throws IOException {
         if (rdbBytesToRead <= 0) {
@@ -294,9 +332,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
             LoggingService.logInfo("RDB content (first 50 bytes): " + HexFormat.of().formatHex(rdbFileContent, 0, Math.min(rdbFileContent.length, 50)));
 
             state = ReplicationState.RECEIVED_RDB;
-            LoggingService.logInfo("Replication handshake completed successfully!");
             state = ReplicationState.READY_FOR_REPLICATION;
-
             receivedRdbData.reset();
             rdbBytesToRead = 0;
         }
@@ -371,24 +407,29 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
     }
 
     private String readLine(ByteBuffer buffer) {
-        buffer.mark();
         StringBuilder sb = new StringBuilder();
-        int bytesRead = 0;
+        int initialPos = buffer.position();
         final int MAX_LINE_LENGTH = Configs.READ_BUFFER_SIZE * 2;
 
         while (buffer.hasRemaining()) {
             char c = (char) buffer.get();
             sb.append(c);
-            bytesRead++;
             if (sb.length() >= 2 && sb.substring(sb.length() - 2).equals("\r\n")) {
                 return sb.toString();
             }
-            if (bytesRead > MAX_LINE_LENGTH) {
-                buffer.reset();
+            if (buffer.position() - initialPos > MAX_LINE_LENGTH) {
+                buffer.position(initialPos);
                 return null;
             }
         }
-        buffer.reset();
+        buffer.position(initialPos);
         return null;
+    }
+
+    private boolean isHandshakeResponse(Object decodedMessage) {
+        if (decodedMessage instanceof String s) {
+            return s.equals("PONG") || s.equals("OK") || s.startsWith("FULLRESYNC");
+        }
+        return false;
     }
 }
