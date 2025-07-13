@@ -18,7 +18,8 @@ public class CommandExecutor {
     public interface ReplicationNotifier {
         void replicateCommand(List<String> commandParts);
         void registerSlaveChannel(SocketChannel slaveChannel);
-        void removeConnectedSlave(SocketChannel slaveChannel); // This already exists
+        void removeConnectedSlave(SocketChannel slaveChannel);
+        int getReplicationOffset();
     }
 
     private final Cache cache;
@@ -241,6 +242,17 @@ public class CommandExecutor {
             arg = args.get(1);
             LoggingService.logInfo("Got REPLCONF with capa: " + arg);
             stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
+        } else if (arg.equalsIgnoreCase("GETACK")) {
+            if (args.size() < 2) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf GETACK' command"));
+                return;
+            }
+            arg = args.get(1);
+            LoggingService.logInfo("Got REPLCONF with GETACK: " + arg);
+            int replicationOffset = replicationNotifier.getReplicationOffset();
+            String s = RESPEncoder.encodeStringArray(List.of("REPLCONF", "ACK", replicationOffset));
+            LoggingService.logInfo("Sending REPLCONF ACK: " + s);
+            stringWriter.accept(s);
         } else {
             stringWriter.accept(RESPEncoder.encodeError("ERR unknown replconf subcommand '" + arg + "'"));
         }

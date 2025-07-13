@@ -6,11 +6,22 @@ import java.util.List;
 
 public class RESPDecoder {
 
-    public static Object decode(ByteBuffer buffer) throws IOException {
+    public static class DecodedResult {
+        public final Object value;
+        public final int bytesProcessed;
+
+        public DecodedResult(Object value, int bytesProcessed) {
+            this.value = value;
+            this.bytesProcessed = bytesProcessed;
+        }
+    }
+
+    public static DecodedResult decode(ByteBuffer buffer) throws IOException {
         if (!buffer.hasRemaining()) {
-            return null;
+            return new DecodedResult(null, 0);
         }
 
+        int startPos = buffer.position();
         buffer.mark();
         char typeChar = (char) buffer.get();
 
@@ -18,13 +29,15 @@ public class RESPDecoder {
             switch (typeChar) {
                 case '+':
                 case '-':
-                case ':':
+                case ':': {
                     String line = readLine(buffer);
                     if (line != null) {
-                        return line.substring(0, line.length() - 2);
+                        int bytes = buffer.position() - startPos;
+                        return new DecodedResult(line.substring(0, line.length() - 2), bytes);
                     }
                     break;
-                case '$':
+                }
+                case '$': {
                     String lengthLine = readLine(buffer);
                     if (lengthLine == null) {
                         break;
@@ -37,7 +50,8 @@ public class RESPDecoder {
                     }
 
                     if (length == -1) {
-                        return null;
+                        int bytes = buffer.position() - startPos;
+                        return new DecodedResult(null, bytes);
                     }
 
                     if (buffer.remaining() >= length + 2) {
@@ -46,10 +60,12 @@ public class RESPDecoder {
                         if (buffer.get() != '\r' || buffer.get() != '\n') {
                             throw new IOException("Missing CRLF after bulk string data.");
                         }
-                        return new String(data, StandardCharsets.UTF_8);
+                        int bytes = buffer.position() - startPos;
+                        return new DecodedResult(new String(data, StandardCharsets.UTF_8), bytes);
                     }
                     break;
-                case '*':
+                }
+                case '*': {
                     String numElementsLine = readLine(buffer);
                     if (numElementsLine == null) {
                         break;
@@ -62,23 +78,27 @@ public class RESPDecoder {
                     }
 
                     if (numElements == -1) {
-                        return null;
+                        int bytes = buffer.position() - startPos;
+                        return new DecodedResult(null, bytes);
                     }
 
                     List<String> array = new ArrayList<>(numElements);
+                    int totalBytes = buffer.position() - startPos;
                     for (int i = 0; i < numElements; i++) {
-                        Object element = decode(buffer);
-                        if (element == null) {
+                        DecodedResult element = decode(buffer);
+                        if (element.value == null) {
                             buffer.reset();
-                            return null;
+                            return new DecodedResult(null, 0);
                         }
-                        if (element instanceof String) {
-                            array.add((String) element);
+                        totalBytes += element.bytesProcessed;
+                        if (element.value instanceof String) {
+                            array.add((String) element.value);
                         } else {
-                            throw new IOException("Unsupported element type in array: " + element.getClass().getSimpleName());
+                            throw new IOException("Unsupported element type in array: " + element.value.getClass().getSimpleName());
                         }
                     }
-                    return array;
+                    return new DecodedResult(array, totalBytes);
+                }
                 default:
                     throw new IOException("Unknown or unsupported RESP type: '" + typeChar + "' (ASCII: " + (int) typeChar + ")");
             }
@@ -88,7 +108,7 @@ public class RESPDecoder {
         }
 
         buffer.reset();
-        return null;
+        return new DecodedResult(null, 0);
     }
 
     private static String readLine(ByteBuffer buffer) {

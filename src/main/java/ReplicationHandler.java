@@ -27,7 +27,8 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
     private final ByteArrayOutputStream receivedRdbData = new ByteArrayOutputStream();
     private final Set<SocketChannel> connectedSlaves = Collections.synchronizedSet(new HashSet<>());
 
-    private final Queue<List<String>> bufferedReplicationCommands = new LinkedList<>();
+    private final Queue<RESPDecoder.DecodedResult> bufferedReplicationCommands = new LinkedList<>();
+    private int bytesProcessedInReplication = 0;
 
     public ReplicationHandler(int port, Selector selector,
                               Consumer<ByteBuffer> queueWriteToMasterCallback,
@@ -76,6 +77,11 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
                 }
             }
         }
+    }
+
+    @Override
+    public int getReplicationOffset() {
+        return bytesProcessedInReplication;
     }
 
     public SocketChannel initiateHandshake() throws IOException {
@@ -175,7 +181,9 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
 
             while (buffer.hasRemaining()) {
                 buffer.mark();
-                Object decodedMessage = RESPDecoder.decode(buffer);
+                RESPDecoder.DecodedResult decoded = RESPDecoder.decode(buffer);
+
+                Object decodedMessage = decoded.value;
 
                 if (decodedMessage == null) {
                     buffer.reset();
@@ -189,7 +197,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
 
                         if (!isHandshakeResponse(decodedMessage)) {
                             LoggingService.logInfo(String.format("Slave: Buffering command '%s' (received during handshake/RDB phase).", cmdAndArgs.getFirst()));
-                            bufferedReplicationCommands.add(cmdAndArgs);
+                            bufferedReplicationCommands.add(decoded);
                         }
                     }
 
@@ -241,7 +249,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
                         throw new IOException("Protocol error: Unexpected message type during handshake.");
                     }
                 } else {
-                    processReplicatedMessage(decodedMessage);
+                    processReplicatedMessage(decoded);
                 }
             }
         } catch (IOException e) {
@@ -262,21 +270,25 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
 
     private void processBufferedAndRemainingCommands(ByteBuffer buffer) throws IOException {
         while (!bufferedReplicationCommands.isEmpty()) {
-            List<String> cmdAndArgs = bufferedReplicationCommands.poll();
+            RESPDecoder.DecodedResult decoded = bufferedReplicationCommands.poll();
+            @SuppressWarnings("unchecked")
+            List<String> cmdAndArgs = (List<String>) decoded.value;
             LoggingService.logInfo(String.format("Slave: Applying buffered command '%s'.", cmdAndArgs.getFirst()));
             String cmd = cmdAndArgs.getFirst().toLowerCase();
             List<String> args = cmdAndArgs.subList(1, cmdAndArgs.size());
             commandExecutor.executeCommand(null, cmd, args,
-                    (_) -> LoggingService.logFine("Slave: Suppressing string response for buffered replicated cmd."),
-                    (_) -> LoggingService.logFine("Slave: Suppressing binary response for buffered replicated cmd."));
+                    (_) -> LoggingService.logInfo("Slave: Suppressing string response for buffered replicated cmd."),
+                    (_) -> LoggingService.logInfo("Slave: Suppressing binary response for buffered replicated cmd."));
+            bytesProcessedInReplication += decoded.bytesProcessed;
         }
         LoggingService.logInfo("All buffered commands applied. Replication handshake completed successfully!");
 
         while (buffer.hasRemaining()) {
             buffer.mark();
-            Object decodedMessage = RESPDecoder.decode(buffer);
+            RESPDecoder.DecodedResult decoded = RESPDecoder.decode(buffer);
+            Object decodedMessage = decoded.value;
             if (decodedMessage != null) {
-                processReplicatedMessage(decodedMessage);
+                processReplicatedMessage(decoded);
             } else {
                 buffer.reset();
                 break;
@@ -284,10 +296,10 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
         }
     }
 
-    private void processReplicatedMessage(Object decodedMessage) throws IOException {
-        if (decodedMessage instanceof List) {
+    private void processReplicatedMessage(RESPDecoder.DecodedResult decoded) throws IOException {
+        if (decoded.value instanceof List) {
             @SuppressWarnings("unchecked")
-            List<String> cmdAndArgs = (List<String>) decodedMessage;
+            List<String> cmdAndArgs = (List<String>) decoded.value;
             if (cmdAndArgs.isEmpty()) {
                 LoggingService.logWarn("Slave: Received empty command array from master.");
                 return;
@@ -298,12 +310,19 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
 
             LoggingService.logInfo(String.format("Slave: Processing replicated command '%s', args: %s", cmd, args));
 
-            commandExecutor.executeCommand(null, cmd, args,
-                    (_) -> LoggingService.logFine("Slave: Suppressing string response for replicated cmd."),
-                    (_) -> LoggingService.logFine("Slave: Suppressing binary response for replicated cmd."));
-
+            if (cmd.equals("replconf") && !args.isEmpty() && args.getFirst().equalsIgnoreCase("getack")) {
+                commandExecutor.executeCommand(null, cmd, args,
+                    (resp) -> queueWriteToMasterCallback.accept(ByteBuffer.wrap(resp.getBytes(StandardCharsets.UTF_8))),
+                    (_) -> {}
+                );
+            } else {
+                commandExecutor.executeCommand(null, cmd, args,
+                    (_) -> LoggingService.logInfo("Slave: Suppressing string response for replicated cmd."),
+                    (_) -> LoggingService.logInfo("Slave: Suppressing binary response for replicated cmd."));
+            }
+            bytesProcessedInReplication += decoded.bytesProcessed;
         } else {
-            LoggingService.logError("Slave: Expected command array for replication, but received: " + decodedMessage.getClass().getSimpleName() + " (" + decodedMessage + ")");
+            LoggingService.logError("Slave: Expected command array for replication, but received: " + decoded.value.getClass().getSimpleName() + " (" + decoded.value + ")");
             throw new IOException("Protocol error: Expected array command during replication.");
         }
     }
@@ -323,7 +342,7 @@ public class ReplicationHandler implements CommandExecutor.ReplicationNotifier {
             byte[] tempBytes = new byte[bytesToReadThisPass];
             buffer.get(tempBytes);
             receivedRdbData.write(tempBytes);
-            LoggingService.logFine("Read " + bytesToReadThisPass + " bytes of RDB. Total received: " + receivedRdbData.size() + "/" + rdbBytesToRead);
+            LoggingService.logInfo("Read " + bytesToReadThisPass + " bytes of RDB. Total received: " + receivedRdbData.size() + "/" + rdbBytesToRead);
         }
 
         if (receivedRdbData.size() == rdbBytesToRead) {
