@@ -44,6 +44,7 @@ public class CommandExecutor {
         commandHandlers.put("psync", this::handlePSyncRequest);
         commandHandlers.put("wait", this::handleWaitRequest);
         commandHandlers.put("type", this::handleTypeRequest);
+        commandHandlers.put("xadd", this::handleXaddRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -437,6 +438,83 @@ public class CommandExecutor {
         } else {
             stringWriter.accept(RESPEncoder.encodeSimpleString(value.getType()));
         }
+    }
+
+    private void handleXaddRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.size() < 4) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'xadd' command"));
+            return;
+        }
+        String streamKey = args.getFirst();
+        String idArg = args.get(1);
+
+        TreeMap<Long, NavigableMap<Long, Map<String, String>>> streamEntries;
+
+        Cache.Value value = cache.get(streamKey);
+        if (value == null) {
+            streamEntries = new TreeMap<>();
+        } else if (value.getType().equals(Cache.TYPE_STREAM)) {
+            //noinspection unchecked
+            streamEntries = (TreeMap<Long, NavigableMap<Long, Map<String, String>>>) value.getValue();
+        } else {
+            stringWriter.accept(RESPEncoder.encodeError("ERR value is not a stream"));
+            return;
+        }
+
+        long milliseconds;
+        long sequence;
+
+        if (idArg.equals("*")) {
+            milliseconds = System.currentTimeMillis();
+            NavigableMap<Long, Map<String, String>> seqMap = streamEntries.computeIfAbsent(milliseconds, _ -> new TreeMap<>());
+            sequence = seqMap.isEmpty() ? 0 : seqMap.lastKey() + 1;
+        } else if (idArg.endsWith("-*")) {
+            String msStr = idArg.substring(0, idArg.length() - 2);
+            try {
+                milliseconds = Long.parseLong(msStr);
+            } catch (NumberFormatException e) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR invalid milliseconds in ID"));
+                return;
+            }
+            NavigableMap<Long, Map<String, String>> seqMap = streamEntries.computeIfAbsent(milliseconds, _ -> new TreeMap<>());
+            sequence = seqMap.isEmpty() ? (milliseconds == 0 ? 1 : 0) : seqMap.lastKey() + 1;
+        } else {
+            String[] parts = idArg.split("-");
+            if (parts.length != 2) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR invalid ID format"));
+                return;
+            }
+            try {
+                milliseconds = Long.parseLong(parts[0]);
+                sequence = Long.parseLong(parts[1]);
+            } catch (NumberFormatException e) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR invalid ID format"));
+                return;
+            }
+            if (milliseconds == 0 && sequence == 0) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR The ID specified in XADD must be greater than 0-0"));
+                return;
+            }
+            NavigableMap<Long, Map<String, String>> seqMap = streamEntries.computeIfAbsent(milliseconds, _ -> new TreeMap<>());
+            if (seqMap.containsKey(sequence)) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
+                return;
+            }
+        }
+
+        Map<String, String> entryFields = new HashMap<>();
+        for (int i = 2; i < args.size(); i += 2) {
+            if (i + 1 >= args.size()) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'xadd' command"));
+                return;
+            }
+
+            entryFields.put(args.get(i), args.get(i + 1));
+        }
+        streamEntries.get(milliseconds).put(sequence, entryFields);
+        cache.put(streamKey, new Cache.Value(streamEntries, Cache.TYPE_STREAM), 0);
+        String id = milliseconds + "-" + sequence;
+        stringWriter.accept(RESPEncoder.encodeSimpleString(id));
     }
 
     private static class PendingWaitRequest {

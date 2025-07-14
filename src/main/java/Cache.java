@@ -7,6 +7,7 @@ public class Cache {
     private final Map<String, Long> expirations;
 
     public static final String TYPE_STRING = "string";
+    public static final String TYPE_STREAM = "stream";
 
     private Cache() {
         this(128, 32);
