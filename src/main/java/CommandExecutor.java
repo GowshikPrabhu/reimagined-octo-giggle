@@ -121,14 +121,18 @@ public class CommandExecutor {
                     stringWriter.accept(RESPEncoder.encodeError("ERR Unimplemented subcommand 'docs' for 'command' command"));
                     return;
                 }
-                Map<String, Map<String, String>> commandDocs = new HashMap<>();
+                List<Object> commandDocs = new ArrayList<>();
                 for (String commandName : commands) {
-                    Map<String, String> commandDoc = new HashMap<>();
-                    commandDoc.put("summary", "Summary of " + commandName + " command");
-                    commandDocs.put(commandName, commandDoc);
+                    List<String> docs = new ArrayList<>();
+                    docs.add("summary");
+                    docs.add("Summary of " + commandName + " command");
+                    docs.add("since");
+                    docs.add("1.0.0");
+                    commandDocs.add(commandName);
+                    commandDocs.add(docs);
                 }
                 LoggingService.logInfo("Sending command list DOCUMENTATION.");
-                stringWriter.accept(RESPEncoder.encodeMap(commandDocs));
+                stringWriter.accept(RESPEncoder.encodeArray(commandDocs));
             } else {
                 stringWriter.accept(RESPEncoder.encodeError("ERR unknown command '" + arg + "' for 'command' command"));
             }

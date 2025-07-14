@@ -67,4 +67,21 @@ public class RESPEncoder {
         baos.write(bytes, 0, bytes.length);
         return baos.toByteArray();
     }
+
+    public static String encodeArray(List<?> commandDocs) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(commandDocs.size()).append("\r\n");
+        for (Object command : commandDocs) {
+            if (command instanceof String) {
+                sb.append(encodeBulkString((String) command));
+            } else if (command instanceof Long || command instanceof Integer) {
+                sb.append(encodeInteger(((Number) command).longValue()));
+            } else if (command instanceof List<?>) {
+                sb.append(encodeArray((List<?>) command));
+            } else {
+                throw new IllegalArgumentException("Unsupported command type: " + command.getClass());
+            }
+        }
+        return sb.toString();
+    }
 }
