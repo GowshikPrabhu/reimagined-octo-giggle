@@ -495,10 +495,21 @@ public class CommandExecutor {
                 stringWriter.accept(RESPEncoder.encodeError("ERR The ID specified in XADD must be greater than 0-0"));
                 return;
             }
+            Long lastTime = streamEntries.lastKey();
+            if (milliseconds < lastTime) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
+                return;
+            }
             NavigableMap<Long, Map<String, String>> seqMap = streamEntries.computeIfAbsent(milliseconds, _ -> new TreeMap<>());
             if (seqMap.containsKey(sequence)) {
                 stringWriter.accept(RESPEncoder.encodeError("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
                 return;
+            } else {
+                Long lastSequence = seqMap.lastKey();
+                if (lastSequence != null && sequence <= lastSequence) {
+                    stringWriter.accept(RESPEncoder.encodeError("ERR The ID specified in XADD is equal or smaller than the target stream top item"));
+                    return;
+                }
             }
         }
 
