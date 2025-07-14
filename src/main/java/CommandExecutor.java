@@ -529,7 +529,11 @@ public class CommandExecutor {
         streamEntries.get(milliseconds).put(sequence, entryFields);
         cache.put(streamKey, new Cache.Value(streamEntries, Cache.TYPE_STREAM), 0);
         String id = milliseconds + "-" + sequence;
-        stringWriter.accept(RESPEncoder.encodeSimpleString(id));
+        if (idArg.equals("*")) {
+            stringWriter.accept(RESPEncoder.encodeBulkString(id));
+        } else {
+            stringWriter.accept(RESPEncoder.encodeSimpleString(id));
+        }
     }
 
     private static class PendingWaitRequest {
