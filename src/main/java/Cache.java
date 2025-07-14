@@ -3,8 +3,10 @@ import java.util.*;
 public class Cache {
     private static volatile Cache instance;
 
-    private final Map<String, String> data;
+    private final Map<String, Value> data;
     private final Map<String, Long> expirations;
+
+    public static final String TYPE_STRING = "string";
 
     private Cache() {
         this(128, 32);
@@ -15,7 +17,7 @@ public class Cache {
         expirations = new HashMap<>(expireDBSize);
     }
 
-    public String get(String key) {
+    public Value get(String key) {
         if (isExpired(key)) {
             data.remove(key);
             expirations.remove(key);
@@ -24,7 +26,7 @@ public class Cache {
         return data.get(key);
     }
 
-    public void put(String key, String value, long ttlMillis) {
+    public void put(String key, Value value, long ttlMillis) {
         data.put(key, value);
         if (ttlMillis > 0) {
             expirations.put(key, System.currentTimeMillis() + ttlMillis);
@@ -33,7 +35,7 @@ public class Cache {
         }
     }
 
-    public void putFromDB(String key, String value, long timeStampMillis) {
+    public void putFromDB(String key, Value value, long timeStampMillis) {
         data.put(key, value);
         if (timeStampMillis > 0) {
             expirations.put(key, timeStampMillis);
@@ -80,5 +82,23 @@ public class Cache {
             }
         }
         return instance;
+    }
+
+    public static class Value {
+        private final Object value;
+        private final String type;
+
+        public Value(Object value, String type) {
+            this.value = value;
+            this.type = type;
+        }
+
+        public Object getValue() {
+            return value;
+        }
+
+        public String getType() {
+            return type;
+        }
     }
 }

@@ -43,6 +43,7 @@ public class CommandExecutor {
         commandHandlers.put("replconf", this::handleReplConfRequest);
         commandHandlers.put("psync", this::handlePSyncRequest);
         commandHandlers.put("wait", this::handleWaitRequest);
+        commandHandlers.put("type", this::handleTypeRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -109,7 +110,7 @@ public class CommandExecutor {
     }
 
     private void handleCommandsRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
-        List<String> commands = List.of("command", "ping", "echo", "set", "get", "config", "keys", "info", "replconf", "psync", "wait");
+        List<String> commands = commandHandlers.keySet().stream().toList();
         if (args.isEmpty()) {
             LoggingService.logFine("Sending command list COMMAND.");
             stringWriter.accept(RESPEncoder.encodeStringArray(commands));
@@ -126,7 +127,7 @@ public class CommandExecutor {
                     commandDoc.put("summary", "Summary of " + commandName + " command");
                     commandDocs.put(commandName, commandDoc);
                 }
-                LoggingService.logFine("Sending command list DOCUMENTATION.");
+                LoggingService.logInfo("Sending command list DOCUMENTATION.");
                 stringWriter.accept(RESPEncoder.encodeMap(commandDocs));
             } else {
                 stringWriter.accept(RESPEncoder.encodeError("ERR unknown command '" + arg + "' for 'command' command"));
@@ -184,7 +185,7 @@ public class CommandExecutor {
             }
         }
 
-        cache.put(key, value, expiresMillis);
+        cache.put(key, new Cache.Value(value, Cache.TYPE_STRING), expiresMillis);
         LoggingService.logFine("Set key '" + key + "' with TTL: " + expiresMillis + "ms");
         stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
         if ("master".equalsIgnoreCase(Configs.getReplicationInfoAsString("role"))) {
@@ -199,8 +200,9 @@ public class CommandExecutor {
             return;
         }
         String key = args.getFirst();
-        String value = cache.get(key);
-        stringWriter.accept(RESPEncoder.encodeBulkString(value));
+        Cache.Value value = cache.get(key);
+        String strValue = value != null ? value.getValue().toString() : null;
+        stringWriter.accept(RESPEncoder.encodeBulkString(strValue));
     }
 
     private void handleConfigRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
@@ -289,7 +291,7 @@ public class CommandExecutor {
                 stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
                 break;
             case "getack":
-                if (args.size() < 1) {
+                if (args.isEmpty()) {
                     stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'replconf GETACK' command"));
                     return;
                 }
@@ -416,6 +418,20 @@ public class CommandExecutor {
 
         } catch (NumberFormatException e) {
             stringWriter.accept(RESPEncoder.encodeError("ERR invalid number format in 'wait' command"));
+        }
+    }
+
+    private void handleTypeRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.isEmpty()) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'type' command"));
+            return;
+        }
+        String key = args.getFirst();
+        Cache.Value value = cache.get(key);
+        if (value == null) {
+            stringWriter.accept(RESPEncoder.encodeSimpleString("none"));
+        } else {
+            stringWriter.accept(RESPEncoder.encodeSimpleString(value.getType()));
         }
     }
 
