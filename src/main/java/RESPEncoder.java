@@ -84,4 +84,8 @@ public class RESPEncoder {
         }
         return sb.toString();
     }
+
+    public static String encodeNull() {
+        return "$-1\r\n";
+    }
 }

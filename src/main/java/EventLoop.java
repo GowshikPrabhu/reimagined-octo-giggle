@@ -6,16 +6,7 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Queue;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.*;
 import java.util.function.Consumer;
 
 public class EventLoop implements AutoCloseable {
@@ -77,6 +68,7 @@ public class EventLoop implements AutoCloseable {
             if (readyCount > 0) {
                 processSelectedKeys();
             }
+            checkBlockedClientTimeouts();
         }
     }
 
@@ -359,6 +351,19 @@ public class EventLoop implements AutoCloseable {
         return masterReadBuffer;
     }
 
+    private void checkBlockedClientTimeouts() {
+        long now = System.currentTimeMillis();
+        for (List<BlockedClient> clients : commandExecutor.blockedClientsPerStream.values()) {
+            Iterator<BlockedClient> iter = clients.iterator();
+            while (iter.hasNext()) {
+                BlockedClient bc = iter.next();
+                if (now >= bc.unblockAt()) {
+                    bc.stringWriter().accept(RESPEncoder.encodeNull());
+                    iter.remove();
+                }
+            }
+        }
+    }
 
     private void closeChannel(SelectionKey key) {
         SocketChannel channel = (SocketChannel) key.channel();

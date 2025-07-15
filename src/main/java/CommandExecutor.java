@@ -1,8 +1,6 @@
 import java.io.IOException;
 import java.util.*;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.nio.channels.SocketChannel; // New import
@@ -28,6 +26,7 @@ public class CommandExecutor {
 
     private final ConcurrentLinkedQueue<PendingWaitRequest> pendingWaitRequests = new ConcurrentLinkedQueue<>();
 
+    public final ConcurrentMap<String, List<BlockedClient>> blockedClientsPerStream = new ConcurrentHashMap<>();
 
     public CommandExecutor() {
         this.cache = Cache.getInstance();
@@ -46,6 +45,7 @@ public class CommandExecutor {
         commandHandlers.put("type", this::handleTypeRequest);
         commandHandlers.put("xadd", this::handleXaddRequest);
         commandHandlers.put("xrange", this::handleXRangeRequest);
+        commandHandlers.put("xread", this::handleXReadRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -535,6 +535,23 @@ public class CommandExecutor {
         } else {
             stringWriter.accept(RESPEncoder.encodeSimpleString(id));
         }
+
+        List<BlockedClient> blockedClients = blockedClientsPerStream.get(streamKey);
+        if (blockedClients != null) {
+            Iterator<BlockedClient> iter = blockedClients.iterator();
+            while (iter.hasNext()) {
+                BlockedClient bc = iter.next();
+                List<Object> result = fetchStreamEntries(bc.streamKeys(), bc.streamIds(), bc.count(), new ArrayList<>());
+                if (!result.isEmpty()) {
+                    bc.stringWriter().accept(RESPEncoder.encodeArray(result));
+                    iter.remove();
+                }
+            }
+            if (blockedClients.isEmpty()) {
+                blockedClientsPerStream.remove(streamKey);
+            }
+        }
+
     }
 
     private void handleXRangeRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
@@ -614,6 +631,143 @@ public class CommandExecutor {
         } else {
             stringWriter.accept(RESPEncoder.encodeArray(resultEntries));
         }
+    }
+
+    private void handleXReadRequest(SocketChannel clientChannel, List<String> args,
+                                    Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        int count = 100;
+        long blockMillis = -1;
+        int idx = 0;
+
+        while (idx < args.size()) {
+            String arg = args.get(idx).toUpperCase();
+            if (arg.equals("COUNT") && idx + 1 < args.size()) {
+                try {
+                    count = Integer.parseInt(args.get(idx + 1));
+                } catch (NumberFormatException e) {
+                    stringWriter.accept(RESPEncoder.encodeError("ERR invalid COUNT value in 'xread' command"));
+                    return;
+                }
+                idx += 2;
+            } else if (arg.equals("BLOCK") && idx + 1 < args.size()) {
+                try {
+                    blockMillis = Long.parseLong(args.get(idx + 1));
+                } catch (NumberFormatException e) {
+                    stringWriter.accept(RESPEncoder.encodeError("ERR invalid BLOCK value in 'xread' command"));
+                    return;
+                }
+                idx += 2;
+            } else {
+                break;
+            }
+        }
+
+        if (idx >= args.size() || !args.get(idx).equalsIgnoreCase("STREAMS")) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR syntax error, missing STREAMS in 'xread' command"));
+            return;
+        }
+        idx++;
+
+        int streamsCount = (args.size() - idx) / 2;
+        if (streamsCount <= 0 || idx + streamsCount * 2 > args.size()) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'xread' command"));
+            return;
+        }
+        List<String> keys = args.subList(idx, idx + streamsCount);
+        List<String> ids = args.subList(idx + streamsCount, idx + streamsCount * 2);
+
+        List<String> updatedIds = new ArrayList<>();
+        List<Object> result = fetchStreamEntries(keys, ids, count, updatedIds);
+
+        if (!result.isEmpty()) {
+            stringWriter.accept(RESPEncoder.encodeArray(result));
+            return;
+        }
+
+        if (blockMillis > -1) {
+            long unblockAt = blockMillis == 0 ? Long.MAX_VALUE : System.currentTimeMillis() + blockMillis;
+            BlockedClient blockedClient = new BlockedClient(clientChannel, keys, updatedIds, count, unblockAt, stringWriter, byteWriter);
+
+            for (String key : keys) {
+                blockedClientsPerStream.computeIfAbsent(key, _ -> new ArrayList<>()).add(blockedClient);
+            }
+            return;
+        }
+
+        stringWriter.accept(RESPEncoder.encodeNull());
+    }
+
+
+    private List<Object> fetchStreamEntries(List<String> keys, List<String> ids, int count, List<String> updatedIds) {
+        List<Object> result = new ArrayList<>();
+
+        for (int i = 0; i < keys.size(); i++) {
+            String streamKey = keys.get(i);
+            String id = ids.get(i);
+
+            Cache.Value value = cache.get(streamKey);
+            if (value == null || !Cache.TYPE_STREAM.equals(value.getType())) {
+                continue;
+            }
+
+            @SuppressWarnings("unchecked")
+            TreeMap<Long, NavigableMap<Long, Map<String, String>>> streamEntries =
+                    (TreeMap<Long, NavigableMap<Long, Map<String, String>>>) value.getValue();
+
+            long startMs, startSeq;
+            if (id.equals("$")) {
+                if (streamEntries.isEmpty()) {
+                    startMs = 0;
+                    startSeq = 0;
+                } else {
+                    Map.Entry<Long, NavigableMap<Long, Map<String, String>>> lastEntry = streamEntries.lastEntry();
+                    startMs = lastEntry.getKey();
+                    startSeq = lastEntry.getValue().lastKey();
+                }
+                id = startMs + "-" + startSeq;
+                updatedIds.add(id);
+            } else {
+                try {
+                    String[] parts = id.split("-");
+                    startMs = Long.parseLong(parts[0]);
+                    startSeq = parts.length > 1 ? Long.parseLong(parts[1]) : 0;
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+                updatedIds.add(id);
+            }
+
+            List<Object> entries = new ArrayList<>();
+            LoggingService.logInfo("Fetching entries for stream: %s, startId: %s, startMS: %s, startSeq: %s, count: %d".formatted(streamKey, id, startMs, startSeq, count));
+            outer:
+            for (Map.Entry<Long, NavigableMap<Long, Map<String, String>>> entry : streamEntries.tailMap(startMs, true).entrySet()) {
+                long ms = entry.getKey();
+                long expectedStartSeq = (ms == startMs) ? startSeq : -1;
+                for (Map.Entry<Long, Map<String, String>> seqEntry : entry.getValue().tailMap(expectedStartSeq, false).entrySet()) {
+                    Map<String, String> fields = seqEntry.getValue();
+                    List<Object> entryData = new ArrayList<>();
+                    entryData.add(ms + "-" + seqEntry.getKey());
+                    List<Object> fieldData = new ArrayList<>();
+                    fields.forEach((k, v) -> {
+                        fieldData.add(k);
+                        fieldData.add(v);
+                    });
+                    entryData.add(fieldData);
+                    entries.add(entryData);
+                    if (entries.size() == count) {
+                        break outer;
+                    }
+                }
+            }
+            if (!entries.isEmpty()) {
+                List<Object> streamData = new ArrayList<>();
+                streamData.add(streamKey);
+                streamData.add(entries);
+                result.add(streamData);
+            }
+        }
+
+        return result;
     }
 
     private static class PendingWaitRequest {
