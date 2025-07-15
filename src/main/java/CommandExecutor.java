@@ -45,6 +45,7 @@ public class CommandExecutor {
         commandHandlers.put("wait", this::handleWaitRequest);
         commandHandlers.put("type", this::handleTypeRequest);
         commandHandlers.put("xadd", this::handleXaddRequest);
+        commandHandlers.put("xrange", this::handleXRangeRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -533,6 +534,85 @@ public class CommandExecutor {
             stringWriter.accept(RESPEncoder.encodeBulkString(id));
         } else {
             stringWriter.accept(RESPEncoder.encodeSimpleString(id));
+        }
+    }
+
+    private void handleXRangeRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.size() < 2 || args.size() > 5) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'xrange' command"));
+            return;
+        }
+        String streamKey = args.getFirst();
+        Cache.Value value = cache.get(streamKey);
+        if (value == null || !Cache.TYPE_STREAM.equals(value.getType())) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR no such stream: " + streamKey));
+            return;
+        }
+
+        @SuppressWarnings("unchecked")
+        TreeMap<Long, NavigableMap<Long, Map<String, String>>> streamEntries = (TreeMap<Long, NavigableMap<Long, Map<String, String>>>) value.getValue();
+
+        String startId = args.get(1);
+        String endId = args.get(2);
+        int count = args.size() > 3 ? Integer.parseInt(args.get(4)) : -1;
+
+        long startMs, startSeq;
+        long endMs, endSeq;
+
+        try {
+            if (startId.equals("-")) {
+                startMs = 0;
+                startSeq = 0;
+            } else {
+                String[] parts = startId.split("-");
+                startMs = Long.parseLong(parts[0]);
+                startSeq = parts.length > 1 ? Long.parseLong(parts[1]) : 0;
+            }
+
+            if (endId.equals("+")) {
+                endMs = Long.MAX_VALUE;
+                endSeq = Long.MAX_VALUE;
+            } else {
+                String[] parts = endId.split("-");
+                endMs = Long.parseLong(parts[0]);
+                endSeq = parts.length > 1 ? Long.parseLong(parts[1]) : Long.MAX_VALUE;
+            }
+        } catch (NumberFormatException e) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR invalid ID format in 'xrange' command"));
+            return;
+        }
+
+        List<Object> resultEntries = new ArrayList<>();
+
+        LoggingService.logInfo("Handling XRANGE for stream: %s, startId: %s, endId: %s, startMS: %s, endMS: %s, startSeq: %s, endSeq: %s, count: %d".formatted(streamKey, startId, endId, startMs, endMs, startSeq, endSeq, count));
+
+        for (Map.Entry<Long, NavigableMap<Long, Map<String, String>>> entry : streamEntries.subMap(startMs, true, endMs, true).entrySet()) {
+            long ms = entry.getKey();
+            long expectedStartSeq = (ms == startMs) ? startSeq : 0;
+            long expectedEndSeq = (ms == endMs) ? endSeq : Long.MAX_VALUE;
+            for (Map.Entry<Long, Map<String, String>> seqEntry : entry.getValue().subMap(expectedStartSeq, true, expectedEndSeq, true).entrySet()) {
+                Map<String, String> fields = seqEntry.getValue();
+                List<Object> entryData = new ArrayList<>();
+                entryData.add(ms + "-" + seqEntry.getKey());
+                List<Object> fieldData = new ArrayList<>();
+                fields.forEach((k, v) -> {
+                    fieldData.add(k);
+                    fieldData.add(v);
+                });
+                entryData.add(fieldData);
+                resultEntries.add(entryData);
+                if (count > 0 && resultEntries.size() == count) {
+                    break;
+                }
+            }
+            if (count > 0 && resultEntries.size() == count) {
+                break;
+            }
+        }
+        if (resultEntries.isEmpty()) {
+            stringWriter.accept(RESPEncoder.encodeArray(Collections.emptyList()));
+        } else {
+            stringWriter.accept(RESPEncoder.encodeArray(resultEntries));
         }
     }
 
