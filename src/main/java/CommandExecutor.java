@@ -3,7 +3,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
-import java.nio.channels.SocketChannel; // New import
+import java.nio.channels.SocketChannel;
 
 public class CommandExecutor {
 
@@ -28,6 +28,8 @@ public class CommandExecutor {
 
     public final ConcurrentMap<String, List<BlockedClient>> blockedClientsPerStream = new ConcurrentHashMap<>();
 
+    private final Map<SocketChannel, List<List<Object>>> transactionCommands = new HashMap<>();
+
     public CommandExecutor() {
         this.cache = Cache.getInstance();
 
@@ -47,6 +49,8 @@ public class CommandExecutor {
         commandHandlers.put("xrange", this::handleXRangeRequest);
         commandHandlers.put("xread", this::handleXReadRequest);
         commandHandlers.put("incr", this::handleIncrRequest);
+        commandHandlers.put("multi", this::handleMultiRequest);
+        commandHandlers.put("exec", this::handleExecRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -159,6 +163,13 @@ public class CommandExecutor {
     }
 
     private void handleSetRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (transactionCommands.containsKey(clientChannel)) {
+            List<List<Object>> commands = transactionCommands.computeIfAbsent(clientChannel, _ -> new LinkedList<>());
+            commands.add(List.of("set", args, bytesConsumed));
+            LoggingService.logFine("Added SET command to transaction queue for client: " + clientChannel);
+            stringWriter.accept(RESPEncoder.encodeSimpleString("QUEUED"));
+            return;
+        }
         if (args.size() < 2) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'set' command"));
             return;
@@ -202,6 +213,13 @@ public class CommandExecutor {
     }
 
     private void handleGetRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (transactionCommands.containsKey(clientChannel)) {
+            List<List<Object>> commands = transactionCommands.computeIfAbsent(clientChannel, _ -> new LinkedList<>());
+            commands.add(List.of("get", args, bytesConsumed));
+            LoggingService.logFine("Added GET command to transaction queue for client: " + clientChannel);
+            stringWriter.accept(RESPEncoder.encodeSimpleString("QUEUED"));
+            return;
+        }
         if (args.isEmpty()) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'get' command"));
             return;
@@ -770,6 +788,13 @@ public class CommandExecutor {
     }
 
     private void handleIncrRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (transactionCommands.containsKey(clientChannel)) {
+            List<List<Object>> commands = transactionCommands.computeIfAbsent(clientChannel, _ -> new LinkedList<>());
+            commands.add(List.of("incr", args, bytesConsumed));
+            LoggingService.logFine("Added INCR command to transaction queued for client: " + clientChannel);
+            stringWriter.accept(RESPEncoder.encodeSimpleString("QUEUED"));
+            return;
+        }
         if (args.size() != 1) {
             stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'incr' command"));
             return;
@@ -791,5 +816,51 @@ public class CommandExecutor {
         cache.put(key, new Cache.Value(newValue, Cache.TYPE_STRING), 0);
         LoggingService.logFine("Incremented key '" + key + "' to value: " + newValue);
         stringWriter.accept(RESPEncoder.encodeInteger(newValue));
+    }
+
+    private void handleMultiRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        transactionCommands.put(clientChannel, new LinkedList<>());
+        stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
+    }
+
+    private void handleExecRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        List<List<Object>> commands = transactionCommands.remove(clientChannel);
+        if (commands == null) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR EXEC without MULTI"));
+            return;
+        }
+        if (commands.isEmpty()) {
+            stringWriter.accept(RESPEncoder.encodeArray(Collections.emptyList()));
+            return;
+        }
+
+        List<String> results = new ArrayList<>();
+        Consumer<String> transactionStringWriter = (resp) -> {
+            if (resp != null) {
+                results.add(resp);
+            }
+        };
+
+        for (List<Object> command : commands) {
+            String cmdName = (String) command.get(0);
+            List<String> cmdArgs = (List<String>) command.get(1);
+            int cmdBytesConsumed = (int) command.get(2);
+            switch (cmdName.toLowerCase()) {
+                case "set":
+                    handleSetRequest(clientChannel, cmdArgs, transactionStringWriter, byteWriter, cmdBytesConsumed);
+                    break;
+                case "get":
+                    handleGetRequest(clientChannel, cmdArgs, transactionStringWriter, byteWriter, cmdBytesConsumed);
+                    break;
+                case "incr":
+                    handleIncrRequest(clientChannel, cmdArgs, transactionStringWriter, byteWriter, cmdBytesConsumed);
+                    break;
+                default:
+                    stringWriter.accept(RESPEncoder.encodeError("ERR unknown command '" + cmdName + "' in transaction"));
+                    return;
+            }
+        }
+        stringWriter.accept(RESPEncoder.encodeRESPArray(results));
+        LoggingService.logFine("Executed transaction for client: " + clientChannel + ", commands: " + commands);
     }
 }

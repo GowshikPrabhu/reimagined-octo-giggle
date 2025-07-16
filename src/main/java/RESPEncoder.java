@@ -88,4 +88,13 @@ public class RESPEncoder {
     public static String encodeNull() {
         return "$-1\r\n";
     }
+
+    public static String encodeRESPArray(List<String> results) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("*").append(results.size()).append("\r\n");
+        for (String result : results) {
+            sb.append(result);
+        }
+        return sb.toString();
+    }
 }
