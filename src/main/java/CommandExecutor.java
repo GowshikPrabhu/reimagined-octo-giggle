@@ -53,7 +53,10 @@ public class CommandExecutor {
         commandHandlers.put("exec", this::handleExecRequest);
         commandHandlers.put("discard", this::handleDiscardRequest);
         commandHandlers.put("rpush", this::handleRPushRequest);
+        commandHandlers.put("lpush", this::handleLPushRequest);
         commandHandlers.put("lrange", this::handleLRangeRequest);
+        commandHandlers.put("llen", this::handleLLenRequest);
+        commandHandlers.put("lpop", this::handleLPopRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -846,6 +849,7 @@ public class CommandExecutor {
 
         for (List<Object> command : commands) {
             String cmdName = (String) command.get(0);
+            //noinspection unchecked
             List<String> cmdArgs = (List<String>) command.get(1);
             int cmdBytesConsumed = (int) command.get(2);
             switch (cmdName.toLowerCase()) {
@@ -887,16 +891,43 @@ public class CommandExecutor {
         List<String> list;
 
         if (value == null || !Cache.TYPE_LIST.equals(value.getType())) {
-            list = new ArrayList<>();
+            list = new LinkedList<>();
         } else {
             //noinspection unchecked
             list = (List<String>) value.getValue();
         }
 
-        list.addAll(values);
+        for (String val : values) {
+            list.addLast(val);
+        }
         cache.put(key, new Cache.Value(list, Cache.TYPE_LIST), 0);
         stringWriter.accept(RESPEncoder.encodeInteger(list.size()));
         LoggingService.logFine("RPUSH command executed for key '" + key + "', new list size: " + list.size());
+    }
+
+    private void handleLPushRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.size() < 2) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'lpush' command"));
+            return;
+        }
+        String key = args.getFirst();
+        List<String> values = args.subList(1, args.size());
+        Cache.Value value = cache.get(key);
+        List<String> list;
+
+        if (value == null || !Cache.TYPE_LIST.equals(value.getType())) {
+            list = new LinkedList<>();
+        } else {
+            //noinspection unchecked
+            list = (List<String>) value.getValue();
+        }
+
+        for (String val : values) {
+            list.addFirst(val);
+        }
+        cache.put(key, new Cache.Value(list, Cache.TYPE_LIST), 0);
+        stringWriter.accept(RESPEncoder.encodeInteger(list.size()));
+        LoggingService.logFine("LPUSH command executed for key '" + key + "', new list size: " + list.size());
     }
 
     private void handleLRangeRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
@@ -941,5 +972,67 @@ public class CommandExecutor {
 
         List<String> result = list.subList(start, end + 1);
         stringWriter.accept(RESPEncoder.encodeStringArray(result));
+    }
+
+    private void handleLLenRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.size() != 1) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'llen' command"));
+            return;
+        }
+        String key = args.getFirst();
+        Cache.Value value = cache.get(key);
+        if (value == null || !Cache.TYPE_LIST.equals(value.getType())) {
+            stringWriter.accept(RESPEncoder.encodeInteger(0));
+            return;
+        }
+
+        //noinspection unchecked
+        List<String> list = (List<String>) value.getValue();
+        stringWriter.accept(RESPEncoder.encodeInteger(list.size()));
+    }
+
+    private void handleLPopRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.isEmpty()) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'lpop' command"));
+            return;
+        }
+        String key = args.getFirst();
+        Cache.Value value = cache.get(key);
+        if (value == null || !Cache.TYPE_LIST.equals(value.getType())) {
+            stringWriter.accept(RESPEncoder.encodeNull());
+            return;
+        }
+        int count;
+        try {
+            count = args.size() == 2 ? Integer.parseInt(args.get(1)) : 1;
+        } catch (NumberFormatException e) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR invalid count for 'lpop' command"));
+            return;
+        }
+
+        //noinspection unchecked
+        List<String> list = (List<String>) value.getValue();
+        if (list.isEmpty()) {
+            stringWriter.accept(RESPEncoder.encodeNull());
+            return;
+        }
+        if (count < 1) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR count must be greater than 0 for 'lpop' command"));
+            return;
+        }
+        if (count > list.size()) {
+            count = list.size();
+        }
+        if (count > 1) {
+            List<String> result = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                String s = list.removeFirst();
+                result.add(s);
+            }
+            stringWriter.accept(RESPEncoder.encodeStringArray(result));
+            return;
+        }
+        String s = list.removeFirst();
+        stringWriter.accept(RESPEncoder.encodeBulkString(s));
     }
 }
