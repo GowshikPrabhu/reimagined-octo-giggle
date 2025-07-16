@@ -30,6 +30,8 @@ public class CommandExecutor {
 
     private final Map<SocketChannel, List<List<Object>>> transactionCommands = new HashMap<>();
 
+    public final ConcurrentMap<String, List<BlockedClient>> blockedClientsPerList = new ConcurrentHashMap<>();
+
     public CommandExecutor() {
         this.cache = Cache.getInstance();
 
@@ -57,6 +59,7 @@ public class CommandExecutor {
         commandHandlers.put("lrange", this::handleLRangeRequest);
         commandHandlers.put("llen", this::handleLLenRequest);
         commandHandlers.put("lpop", this::handleLPopRequest);
+        commandHandlers.put("blpop", this::handleBLPopRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -903,6 +906,8 @@ public class CommandExecutor {
         cache.put(key, new Cache.Value(list, Cache.TYPE_LIST), 0);
         stringWriter.accept(RESPEncoder.encodeInteger(list.size()));
         LoggingService.logFine("RPUSH command executed for key '" + key + "', new list size: " + list.size());
+
+        updateBlockedClients(key);
     }
 
     private void handleLPushRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
@@ -928,6 +933,26 @@ public class CommandExecutor {
         cache.put(key, new Cache.Value(list, Cache.TYPE_LIST), 0);
         stringWriter.accept(RESPEncoder.encodeInteger(list.size()));
         LoggingService.logFine("LPUSH command executed for key '" + key + "', new list size: " + list.size());
+
+        updateBlockedClients(key);
+    }
+
+    private void updateBlockedClients(String key) {
+        List<BlockedClient> blockedClients = blockedClientsPerList.get(key);
+        if (blockedClients != null) {
+            Iterator<BlockedClient> iter = blockedClients.iterator();
+            while (iter.hasNext()) {
+                BlockedClient bc = iter.next();
+                List<String> result = popFromKeys(bc.streamKeys());
+                if (!result.isEmpty()) {
+                    bc.stringWriter().accept(RESPEncoder.encodeArray(result));
+                    iter.remove();
+                }
+            }
+            if (blockedClients.isEmpty()) {
+                blockedClientsPerList.remove(key);
+            }
+        }
     }
 
     private void handleLRangeRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
@@ -1034,5 +1059,53 @@ public class CommandExecutor {
         }
         String s = list.removeFirst();
         stringWriter.accept(RESPEncoder.encodeBulkString(s));
+    }
+
+    private void handleBLPopRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.size() < 2) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'blpop' command"));
+            return;
+        }
+        long blockMillis;
+        try {
+            blockMillis = (long) (Double.parseDouble(args.getLast()) * 1000L);
+            LoggingService.logInfo("Block time for BLPOP: " + blockMillis + "ms");
+            if (blockMillis < 0) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR timeout must be a non-negative integer for 'blpop' command"));
+                return;
+            }
+        } catch (NumberFormatException e) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR invalid timeout value for 'blpop' command"));
+            return;
+        }
+
+        List<String> keys = args.subList(0, args.size() - 1);
+        List<String> result = popFromKeys(keys);
+        if (!result.isEmpty()) {
+            stringWriter.accept(RESPEncoder.encodeArray(result));
+            return;
+        }
+        long unblockAt = blockMillis == 0 ? Long.MAX_VALUE : System.currentTimeMillis() + blockMillis;
+        BlockedClient blockedClient = new BlockedClient(clientChannel, keys, Collections.emptyList(), 1, unblockAt, stringWriter, byteWriter);
+
+        for (String key : keys) {
+            blockedClientsPerList.computeIfAbsent(key, _ -> new ArrayList<>()).add(blockedClient);
+        }
+    }
+
+    private List<String> popFromKeys(List<String> keys) {
+        for (String key : keys) {
+            Cache.Value value = cache.get(key);
+            if (value == null || !Cache.TYPE_LIST.equals(value.getType())) {
+                continue;
+            }
+            //noinspection unchecked
+            List<String> list = (List<String>) value.getValue();
+            if (!list.isEmpty()) {
+                String s = list.removeFirst();
+                return List.of(key, s);
+            }
+        }
+        return Collections.emptyList();
     }
 }

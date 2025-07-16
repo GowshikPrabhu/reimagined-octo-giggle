@@ -363,6 +363,16 @@ public class EventLoop implements AutoCloseable {
                 }
             }
         }
+        for (List<BlockedClient> clients : commandExecutor.blockedClientsPerList.values()) {
+            Iterator<BlockedClient> iter = clients.iterator();
+            while (iter.hasNext()) {
+                BlockedClient bc = iter.next();
+                if (now >= bc.unblockAt()) {
+                    bc.stringWriter().accept(RESPEncoder.encodeNull());
+                    iter.remove();
+                }
+            }
+        }
     }
 
     private void closeChannel(SelectionKey key) {
