@@ -51,6 +51,7 @@ public class CommandExecutor {
         commandHandlers.put("incr", this::handleIncrRequest);
         commandHandlers.put("multi", this::handleMultiRequest);
         commandHandlers.put("exec", this::handleExecRequest);
+        commandHandlers.put("discard", this::handleDiscardRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -862,5 +863,14 @@ public class CommandExecutor {
         }
         stringWriter.accept(RESPEncoder.encodeRESPArray(results));
         LoggingService.logFine("Executed transaction for client: " + clientChannel + ", commands: " + commands);
+    }
+
+    private void handleDiscardRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (transactionCommands.remove(clientChannel) == null) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR DISCARD without MULTI"));
+        } else {
+            stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
+            LoggingService.logFine("Discarded transaction for client: " + clientChannel);
+        }
     }
 }
