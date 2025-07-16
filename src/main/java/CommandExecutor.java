@@ -46,6 +46,7 @@ public class CommandExecutor {
         commandHandlers.put("xadd", this::handleXaddRequest);
         commandHandlers.put("xrange", this::handleXRangeRequest);
         commandHandlers.put("xread", this::handleXReadRequest);
+        commandHandlers.put("incr", this::handleIncrRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -768,6 +769,30 @@ public class CommandExecutor {
         }
 
         return result;
+    }
+
+    private void handleIncrRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.size() != 1) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'incr' command"));
+            return;
+        }
+        String key = args.getFirst();
+        Cache.Value value = cache.get(key);
+        long currentValue = 0;
+
+        if (value != null && value.getType().equals(Cache.TYPE_STRING)) {
+            try {
+                currentValue = Long.parseLong(value.getValue().toString());
+            } catch (NumberFormatException e) {
+                stringWriter.accept(RESPEncoder.encodeError("ERR value is not an integer or out of range"));
+                return;
+            }
+        }
+
+        long newValue = currentValue + 1;
+        cache.put(key, new Cache.Value(newValue, Cache.TYPE_STRING), 0);
+        LoggingService.logFine("Incremented key '" + key + "' to value: " + newValue);
+        stringWriter.accept(RESPEncoder.encodeInteger(newValue));
     }
 
     private static class PendingWaitRequest {
