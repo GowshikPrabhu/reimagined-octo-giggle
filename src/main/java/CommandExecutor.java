@@ -634,8 +634,7 @@ public class CommandExecutor {
         }
     }
 
-    private void handleXReadRequest(SocketChannel clientChannel, List<String> args,
-                                    Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+    private void handleXReadRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
         int count = 100;
         long blockMillis = -1;
         int idx = 0;
@@ -697,7 +696,6 @@ public class CommandExecutor {
 
         stringWriter.accept(RESPEncoder.encodeNull());
     }
-
 
     private List<Object> fetchStreamEntries(List<String> keys, List<String> ids, int count, List<String> updatedIds) {
         List<Object> result = new ArrayList<>();
@@ -793,39 +791,5 @@ public class CommandExecutor {
         cache.put(key, new Cache.Value(newValue, Cache.TYPE_STRING), 0);
         LoggingService.logFine("Incremented key '" + key + "' to value: " + newValue);
         stringWriter.accept(RESPEncoder.encodeInteger(newValue));
-    }
-
-    private static class PendingWaitRequest {
-        final SocketChannel clientChannel;
-        final Consumer<String> stringWriter;
-        final int requiredSlaves;
-        final long masterOffset;
-        final long timeoutMillis;
-        final long startTime;
-        final CountDownLatch latch;
-
-        PendingWaitRequest(SocketChannel clientChannel, Consumer<String> stringWriter, int requiredSlaves, long masterOffset, long timeoutMillis, CountDownLatch latch) {
-            this.clientChannel = clientChannel;
-            this.stringWriter = stringWriter;
-            this.requiredSlaves = requiredSlaves;
-            this.masterOffset = masterOffset;
-            this.timeoutMillis = timeoutMillis;
-            this.startTime = System.currentTimeMillis();
-            this.latch = latch;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) return true;
-            if (o == null || getClass() != o.getClass()) return false;
-            PendingWaitRequest that = (PendingWaitRequest) o;
-            return clientChannel.equals(that.clientChannel) &&
-                   masterOffset == that.masterOffset;
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(clientChannel, masterOffset);
-        }
     }
 }
