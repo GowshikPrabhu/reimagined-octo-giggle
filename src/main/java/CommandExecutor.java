@@ -53,6 +53,7 @@ public class CommandExecutor {
         commandHandlers.put("exec", this::handleExecRequest);
         commandHandlers.put("discard", this::handleDiscardRequest);
         commandHandlers.put("rpush", this::handleRPushRequest);
+        commandHandlers.put("lrange", this::handleLRangeRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -896,5 +897,49 @@ public class CommandExecutor {
         cache.put(key, new Cache.Value(list, Cache.TYPE_LIST), 0);
         stringWriter.accept(RESPEncoder.encodeInteger(list.size()));
         LoggingService.logFine("RPUSH command executed for key '" + key + "', new list size: " + list.size());
+    }
+
+    private void handleLRangeRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.size() != 3) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'lrange' command"));
+            return;
+        }
+        String key = args.getFirst();
+        Cache.Value value = cache.get(key);
+        if (value == null || !Cache.TYPE_LIST.equals(value.getType())) {
+            stringWriter.accept(RESPEncoder.encodeArray(Collections.emptyList()));
+            return;
+        }
+
+        //noinspection unchecked
+        List<String> list = (List<String>) value.getValue();
+        if (list.isEmpty()) {
+            stringWriter.accept(RESPEncoder.encodeArray(Collections.emptyList()));
+            return;
+        }
+        int start = Integer.parseInt(args.get(1));
+        int end = Integer.parseInt(args.get(2));
+
+        if (start < 0) {
+            start += list.size();
+        }
+        if (start < 0) {
+            start = 0;
+        }
+        if (end < 0) {
+            end += list.size();
+        }
+
+        if (start >= list.size() || end < 0 || start > end) {
+            stringWriter.accept(RESPEncoder.encodeArray(Collections.emptyList()));
+            return;
+        }
+
+        if (end > list.size()) {
+            end = list.size() - 1;
+        }
+
+        List<String> result = list.subList(start, end + 1);
+        stringWriter.accept(RESPEncoder.encodeStringArray(result));
     }
 }
