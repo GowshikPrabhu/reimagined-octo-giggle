@@ -8,6 +8,7 @@ public class Cache {
 
     public static final String TYPE_STRING = "string";
     public static final String TYPE_STREAM = "stream";
+    public static final String TYPE_LIST = "list";
 
     private Cache() {
         this(128, 32);

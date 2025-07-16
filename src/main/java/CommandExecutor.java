@@ -52,6 +52,7 @@ public class CommandExecutor {
         commandHandlers.put("multi", this::handleMultiRequest);
         commandHandlers.put("exec", this::handleExecRequest);
         commandHandlers.put("discard", this::handleDiscardRequest);
+        commandHandlers.put("rpush", this::handleRPushRequest);
     }
 
     public void setReplicationNotifier(ReplicationNotifier notifier) {
@@ -872,5 +873,28 @@ public class CommandExecutor {
             stringWriter.accept(RESPEncoder.encodeSimpleString("OK"));
             LoggingService.logFine("Discarded transaction for client: " + clientChannel);
         }
+    }
+
+    private void handleRPushRequest(SocketChannel clientChannel, List<String> args, Consumer<String> stringWriter, Consumer<byte[]> byteWriter, int bytesConsumed) {
+        if (args.size() < 2) {
+            stringWriter.accept(RESPEncoder.encodeError("ERR wrong number of arguments for 'rpush' command"));
+            return;
+        }
+        String key = args.getFirst();
+        List<String> values = args.subList(1, args.size());
+        Cache.Value value = cache.get(key);
+        List<String> list;
+
+        if (value == null || !Cache.TYPE_LIST.equals(value.getType())) {
+            list = new ArrayList<>();
+        } else {
+            //noinspection unchecked
+            list = (List<String>) value.getValue();
+        }
+
+        list.addAll(values);
+        cache.put(key, new Cache.Value(list, Cache.TYPE_LIST), 0);
+        stringWriter.accept(RESPEncoder.encodeInteger(list.size()));
+        LoggingService.logFine("RPUSH command executed for key '" + key + "', new list size: " + list.size());
     }
 }
